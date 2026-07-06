@@ -10,6 +10,7 @@ Desktop.ini
 *.tmp
 *.temp
 ~$*
+tmp/
 
 # Logs
 *.log
