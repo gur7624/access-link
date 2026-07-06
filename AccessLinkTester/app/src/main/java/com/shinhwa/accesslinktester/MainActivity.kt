@@ -1,5 +1,6 @@
 package com.shinhwa.accesslinktester
 
+import android.annotation.SuppressLint
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -37,6 +38,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -49,11 +51,17 @@ import java.util.Date
 import java.util.Locale
 
 private const val ACTION_USB_PERMISSION = "com.shinhwa.accesslinktester.USB_PERMISSION"
+private const val ACCESS_LINK_SERIAL_VENDOR_ID = 0x1A86
+private const val ACCESS_LINK_SERIAL_PRODUCT_ID = 0x7523
+private const val ACCESS_LINK_LAN_VENDOR_ID = 0x0BDA
+private const val ACCESS_LINK_LAN_PRODUCT_ID = 0x8152
 
 class MainActivity : ComponentActivity() {
     private lateinit var usbManager: UsbManager
     private val usbDevices = mutableStateListOf<UsbDeviceSnapshot>()
     private val logs = mutableStateListOf<String>()
+    private val serialState = mutableStateOf(SerialUiState())
+    private var serialController: AccessLinkSerialController? = null
 
     private val usbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -95,22 +103,28 @@ class MainActivity : ComponentActivity() {
             AccessLinkTesterTheme(dynamicColor = false) {
                 UsbDiagnosticApp(
                     devices = usbDevices,
+                    serialState = serialState.value,
                     logs = logs,
                     onRefresh = {
                         appendLog("USB 장치 목록 새로고침")
                         refreshUsbDevices()
                     },
-                    onRequestPermission = ::requestUsbPermission
+                    onRequestPermission = ::requestUsbPermission,
+                    onConnectSerial = ::connectSerial,
+                    onDisconnectSerial = ::disconnectSerial,
+                    onRelayCommand = ::sendRelayCommand
                 )
             }
         }
     }
 
     override fun onDestroy() {
+        disconnectSerial()
         unregisterReceiver(usbReceiver)
         super.onDestroy()
     }
 
+    @SuppressLint("UnspecifiedRegisterReceiverFlag")
     private fun registerUsbReceiver() {
         val filter = IntentFilter().apply {
             addAction(ACTION_USB_PERMISSION)
@@ -165,6 +179,72 @@ class MainActivity : ComponentActivity() {
         appendLog("USB 권한 요청: ${usbDevice.deviceName}")
     }
 
+    private fun connectSerial(baudRate: Int) {
+        val device = usbManager.deviceList.values.firstOrNull { it.isAccessLinkSerialDevice() }
+        if (device == null) {
+            appendLog("CH340 Serial 장치를 찾을 수 없습니다.")
+            serialState.value = serialState.value.copy(status = "CH340 장치 없음")
+            return
+        }
+
+        if (!usbManager.hasPermission(device)) {
+            appendLog("Serial 연결 전 USB 권한이 필요합니다.")
+            requestUsbPermission(device.toSnapshot(false))
+            serialState.value = serialState.value.copy(status = "USB 권한 필요")
+            return
+        }
+
+        disconnectSerial()
+        try {
+            val controller = AccessLinkSerialController(
+                usbManager = usbManager,
+                device = device,
+                baudRate = baudRate,
+                onLog = { message -> runOnUiThread { appendLog(message) } },
+                onReceive = { data ->
+                    runOnUiThread {
+                        appendLog("수신 ${data.toHexString()} / ${AccessLinkProtocol.describeIncoming(data)}")
+                    }
+                }
+            )
+            controller.open()
+            serialController = controller
+            serialState.value = SerialUiState(
+                connected = true,
+                baudRate = baudRate,
+                status = "연결됨: ${baudRate}bps"
+            )
+        } catch (exception: Exception) {
+            serialController = null
+            serialState.value = SerialUiState(
+                connected = false,
+                baudRate = baudRate,
+                status = "연결 실패: ${exception.message ?: "알 수 없는 오류"}"
+            )
+            appendLog(serialState.value.status)
+        }
+    }
+
+    private fun disconnectSerial() {
+        serialController?.close()
+        serialController = null
+        if (serialState.value.connected) {
+            appendLog("CH340 Serial 연결 해제")
+        }
+        serialState.value = serialState.value.copy(connected = false, status = "연결 안 됨")
+    }
+
+    private fun sendRelayCommand(useRelay: Int, outputType: Int, time: Int) {
+        val packet = AccessLinkProtocol.relayControl(useRelay, outputType, time)
+        try {
+            val controller = serialController ?: error("Serial 연결이 필요합니다.")
+            controller.write(packet)
+            appendLog("송신 ${packet.toHexString()}")
+        } catch (exception: Exception) {
+            appendLog("릴레이 명령 실패: ${exception.message ?: "알 수 없는 오류"}")
+        }
+    }
+
     private fun appendLog(message: String) {
         val time = SimpleDateFormat("HH:mm:ss", Locale.KOREA).format(Date())
         logs.add(0, "[$time] $message")
@@ -177,9 +257,13 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun UsbDiagnosticApp(
     devices: List<UsbDeviceSnapshot>,
+    serialState: SerialUiState,
     logs: List<String>,
     onRefresh: () -> Unit,
-    onRequestPermission: (UsbDeviceSnapshot) -> Unit
+    onRequestPermission: (UsbDeviceSnapshot) -> Unit,
+    onConnectSerial: (Int) -> Unit,
+    onDisconnectSerial: () -> Unit,
+    onRelayCommand: (Int, Int, Int) -> Unit
 ) {
     Scaffold(
         modifier = Modifier.fillMaxSize(),
@@ -202,6 +286,17 @@ private fun UsbDiagnosticApp(
 
             item {
                 StatusSummary(devices = devices)
+            }
+
+            item {
+                SerialControlCard(
+                    serialDevice = devices.firstOrNull { it.isAccessLinkSerial },
+                    serialState = serialState,
+                    onConnectSerial = onConnectSerial,
+                    onDisconnectSerial = onDisconnectSerial,
+                    onRequestPermission = onRequestPermission,
+                    onRelayCommand = onRelayCommand
+                )
             }
 
             if (devices.isEmpty()) {
@@ -308,6 +403,100 @@ private fun EmptyDeviceCard() {
             Text("연결 안내", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             Text("ACCESS LINK의 USB-C 포트를 Android 휴대폰에 연결한 뒤 새로고침을 누르세요.")
             Text("장치가 표시되면 권한 요청 버튼으로 Vendor ID, Product ID, Interface 정보를 확인할 수 있습니다.")
+        }
+    }
+}
+
+@Composable
+private fun SerialControlCard(
+    serialDevice: UsbDeviceSnapshot?,
+    serialState: SerialUiState,
+    onConnectSerial: (Int) -> Unit,
+    onDisconnectSerial: () -> Unit,
+    onRequestPermission: (UsbDeviceSnapshot) -> Unit,
+    onRelayCommand: (Int, Int, Int) -> Unit
+) {
+    InfoCard {
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("ACCESS LINK 제어 테스트", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    Text(serialState.status, style = MaterialTheme.typography.bodySmall, color = Color(0xFF5B6472))
+                }
+                StatusChip(
+                    text = if (serialState.connected) "Serial 연결" else "대기",
+                    color = if (serialState.connected) PassGreen else WaitGray
+                )
+            }
+
+            if (serialDevice == null) {
+                Text("CH340 USB Serial 장치가 감지되면 릴레이 테스트를 시작할 수 있습니다.")
+                return@InfoCard
+            }
+
+            if (!serialDevice.hasPermission) {
+                Button(onClick = { onRequestPermission(serialDevice) }, modifier = Modifier.fillMaxWidth()) {
+                    Text("CH340 USB 권한 요청")
+                }
+                return@InfoCard
+            }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                Button(onClick = { onConnectSerial(9600) }, modifier = Modifier.weight(1f)) {
+                    Text("9600 연결")
+                }
+                Button(onClick = { onConnectSerial(115200) }, modifier = Modifier.weight(1f)) {
+                    Text("115200 연결")
+                }
+            }
+
+            if (serialState.connected) {
+                Button(onClick = onDisconnectSerial, modifier = Modifier.fillMaxWidth()) {
+                    Text("Serial 연결 해제")
+                }
+
+                Text("릴레이 테스트", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                RelayButtonRow(
+                    title = "Relay 0",
+                    onOn = { onRelayCommand(1, 1, 0) },
+                    onOff = { onRelayCommand(1, 0, 0) }
+                )
+                RelayButtonRow(
+                    title = "Relay 1",
+                    onOn = { onRelayCommand(2, 1, 0) },
+                    onOff = { onRelayCommand(2, 0, 0) }
+                )
+                RelayButtonRow(
+                    title = "전체 릴레이",
+                    onOn = { onRelayCommand(0, 1, 0) },
+                    onOff = { onRelayCommand(0, 0, 0) }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun RelayButtonRow(
+    title: String,
+    onOn: () -> Unit,
+    onOff: () -> Unit
+) {
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Text(title, modifier = Modifier.weight(1f), fontWeight = FontWeight.Medium)
+        Button(onClick = onOn, modifier = Modifier.weight(1f)) {
+            Text("ON")
+        }
+        Button(onClick = onOff, modifier = Modifier.weight(1f)) {
+            Text("OFF")
         }
     }
 }
@@ -513,6 +702,10 @@ private fun UsbEndpoint.toSnapshot(): UsbEndpointSnapshot {
     )
 }
 
+private fun UsbDevice.isAccessLinkSerialDevice(): Boolean {
+    return vendorId == ACCESS_LINK_SERIAL_VENDOR_ID && productId == ACCESS_LINK_SERIAL_PRODUCT_ID
+}
+
 private fun Intent.usbDevice(): UsbDevice? {
     return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
         getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
@@ -530,6 +723,12 @@ private inline fun safeValue(block: () -> String?): String {
     }
 }
 
+private data class SerialUiState(
+    val connected: Boolean = false,
+    val baudRate: Int = 9600,
+    val status: String = "연결 안 됨"
+)
+
 private data class UsbDeviceSnapshot(
     val deviceName: String,
     val vendorId: Int,
@@ -544,6 +743,8 @@ private data class UsbDeviceSnapshot(
 ) {
     val displayName: String
         get() = when {
+            isAccessLinkLan -> "ACCESS LINK USB LAN"
+            isAccessLinkSerial -> "ACCESS LINK USB Serial"
             productName != "미확인" && productName != "권한 필요" -> productName
             manufacturerName != "미확인" && manufacturerName != "권한 필요" -> manufacturerName
             else -> "USB 장치"
@@ -552,11 +753,17 @@ private data class UsbDeviceSnapshot(
     val vendorIdHex: String get() = vendorId.toUsbHex()
     val productIdHex: String get() = productId.toUsbHex()
     val deviceClassName: String get() = usbClassName(deviceClass)
+    val isAccessLinkSerial: Boolean
+        get() = vendorId == ACCESS_LINK_SERIAL_VENDOR_ID && productId == ACCESS_LINK_SERIAL_PRODUCT_ID
+    val isAccessLinkLan: Boolean
+        get() = vendorId == ACCESS_LINK_LAN_VENDOR_ID && productId == ACCESS_LINK_LAN_PRODUCT_ID
 
     val typeGuess: String
         get() {
             val classes = interfaces.map { it.interfaceClass }.toSet() + deviceClass
             return when {
+                isAccessLinkSerial -> "CH340 USB Serial"
+                isAccessLinkLan -> "USB Ethernet/LAN"
                 UsbConstants.USB_CLASS_COMM in classes || UsbConstants.USB_CLASS_CDC_DATA in classes -> "Serial/CDC 추정"
                 UsbConstants.USB_CLASS_HID in classes -> "HID 추정"
                 UsbConstants.USB_CLASS_MISC in classes || interfaces.size > 1 -> "Composite 추정"
@@ -657,9 +864,13 @@ private fun UsbDiagnosticPreview() {
     AccessLinkTesterTheme(dynamicColor = false) {
         UsbDiagnosticApp(
             devices = listOf(previewDevice),
+            serialState = SerialUiState(connected = true, baudRate = 9600, status = "연결됨: 9600bps"),
             logs = listOf("[12:00:00] 미리보기 로그"),
             onRefresh = {},
-            onRequestPermission = {}
+            onRequestPermission = {},
+            onConnectSerial = {},
+            onDisconnectSerial = {},
+            onRelayCommand = { _, _, _ -> }
         )
     }
 }
