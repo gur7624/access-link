@@ -55,6 +55,8 @@ private const val ACCESS_LINK_SERIAL_VENDOR_ID = 0x1A86
 private const val ACCESS_LINK_SERIAL_PRODUCT_ID = 0x7523
 private const val ACCESS_LINK_LAN_VENDOR_ID = 0x0BDA
 private const val ACCESS_LINK_LAN_PRODUCT_ID = 0x8152
+private const val RAW_32_CARD_BYTES = 4
+private const val RAW_32_BUFFER_TIMEOUT_MS = 300L
 
 class MainActivity : ComponentActivity() {
     private lateinit var usbManager: UsbManager
@@ -63,6 +65,8 @@ class MainActivity : ComponentActivity() {
     private val serialState = mutableStateOf(SerialUiState())
     private val portState = mutableStateOf(PortDashboardState())
     private var serialController: AccessLinkSerialController? = null
+    private val raw32Buffer = ArrayDeque<Byte>()
+    private var raw32BufferUpdatedAt = 0L
 
     private val usbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -205,8 +209,7 @@ class MainActivity : ComponentActivity() {
                 onLog = { message -> runOnUiThread { appendLog(message) } },
                 onReceive = { data ->
                     runOnUiThread {
-                        updatePortState(data)
-                        appendLog("수신 ${data.toHexString()} / ${AccessLinkProtocol.describeIncoming(data)}")
+                        appendLog(handleSerialReceive(data))
                     }
                 }
             )
@@ -248,8 +251,56 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun handleSerialReceive(data: ByteArray): String {
+        val rawHex = data.toHexString()
+        if (data.isAccessLinkPacket()) {
+            raw32Buffer.clear()
+            updatePortState(data)
+            return "수신 $rawHex / ${AccessLinkProtocol.describeIncoming(data)}"
+        }
+
+        val raw32 = updateRaw32Candidate(data)
+        if (raw32 != null) {
+            portState.value = portState.value.copy(
+                lastWiegand = raw32.summary,
+                lastRawHex = rawHex
+            )
+            return "수신 $rawHex / 32bit 카드 후보: ${raw32.summary}"
+        }
+
+        portState.value = portState.value.copy(lastRawHex = rawHex)
+        return if (data.size <= RAW_32_CARD_BYTES) {
+            "수신 $rawHex / 32bit 조각 수신: ${raw32Buffer.size}/4 bytes"
+        } else {
+            "수신 $rawHex / 원시 수신: $rawHex"
+        }
+    }
+
+    private fun updateRaw32Candidate(data: ByteArray): WiegandInput? {
+        val now = System.currentTimeMillis()
+        if (now - raw32BufferUpdatedAt > RAW_32_BUFFER_TIMEOUT_MS) {
+            raw32Buffer.clear()
+        }
+        raw32BufferUpdatedAt = now
+
+        if (data.size > RAW_32_CARD_BYTES) {
+            raw32Buffer.clear()
+            return null
+        }
+
+        data.forEach { byte -> raw32Buffer.addLast(byte) }
+        while (raw32Buffer.size > RAW_32_CARD_BYTES) {
+            raw32Buffer.removeFirst()
+        }
+
+        if (raw32Buffer.size != RAW_32_CARD_BYTES) return null
+        val candidate = AccessLinkProtocol.decodeRaw32Input(raw32Buffer.toByteArray())
+        raw32Buffer.clear()
+        return candidate
+    }
+
     private fun updatePortState(data: ByteArray) {
-        if (data.size < 4 || data.first() != 0x02.toByte() || data.last() != 0x03.toByte()) {
+        if (!data.isAccessLinkPacket()) {
             portState.value = portState.value.copy(lastRawHex = data.toHexString())
             return
         }
@@ -259,13 +310,8 @@ class MainActivity : ComponentActivity() {
         val rawHex = data.toHexString()
         portState.value = when (command) {
             AccessLinkProtocol.CMD_GET_WIEGAND_INPUT_DATA -> {
-                val bitLength = when (payload.size) {
-                    8 -> "26bit"
-                    10 -> "34bit"
-                    else -> "${payload.size} bytes"
-                }
                 portState.value.copy(
-                    lastWiegand = "${payload.toDisplayText()} ($bitLength)",
+                    lastWiegand = AccessLinkProtocol.decodeWiegandInput(payload).summary,
                     lastRawHex = rawHex
                 )
             }
@@ -297,6 +343,10 @@ class MainActivity : ComponentActivity() {
             logs.removeRange(80, logs.size)
         }
     }
+}
+
+private fun ByteArray.isAccessLinkPacket(): Boolean {
+    return size >= 4 && first() == 0x02.toByte() && last() == 0x03.toByte()
 }
 
 @Composable
