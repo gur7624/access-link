@@ -11,6 +11,11 @@ import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbEndpoint
 import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
+import android.net.ConnectivityManager
+import android.net.LinkProperties
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -57,16 +62,23 @@ private const val ACCESS_LINK_LAN_VENDOR_ID = 0x0BDA
 private const val ACCESS_LINK_LAN_PRODUCT_ID = 0x8152
 private const val RAW_32_CARD_BYTES = 4
 private const val RAW_32_BUFFER_TIMEOUT_MS = 300L
+private const val RAW_32_STABLE_WINDOW_MS = 2_000L
 
 class MainActivity : ComponentActivity() {
     private lateinit var usbManager: UsbManager
+    private lateinit var connectivityManager: ConnectivityManager
     private val usbDevices = mutableStateListOf<UsbDeviceSnapshot>()
     private val logs = mutableStateListOf<String>()
     private val serialState = mutableStateOf(SerialUiState())
+    private val ethernetState = mutableStateOf(EthernetUiState())
     private val portState = mutableStateOf(PortDashboardState())
+    private val adminMode = mutableStateOf(false)
     private var serialController: AccessLinkSerialController? = null
     private val raw32Buffer = ArrayDeque<Byte>()
     private var raw32BufferUpdatedAt = 0L
+    private var lastRaw32CandidateHex: String? = null
+    private var lastRaw32CandidateAt = 0L
+    private var lastRaw32CandidateCount = 0
 
     private val usbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -97,11 +109,32 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private val ethernetCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) {
+            runOnUiThread { refreshEthernetState() }
+        }
+
+        override fun onLost(network: Network) {
+            runOnUiThread { refreshEthernetState() }
+        }
+
+        override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
+            runOnUiThread { refreshEthernetState() }
+        }
+
+        override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) {
+            runOnUiThread { refreshEthernetState() }
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         usbManager = getSystemService(UsbManager::class.java)
+        connectivityManager = getSystemService(ConnectivityManager::class.java)
         registerUsbReceiver()
+        registerEthernetCallback()
         refreshUsbDevices()
+        refreshEthernetState()
         enableEdgeToEdge()
 
         setContent {
@@ -109,12 +142,16 @@ class MainActivity : ComponentActivity() {
                 UsbDiagnosticApp(
                     devices = usbDevices,
                     serialState = serialState.value,
+                    ethernetState = ethernetState.value,
                     portState = portState.value,
                     logs = logs,
+                    adminMode = adminMode.value,
                     onRefresh = {
                         appendLog("USB 장치 목록 새로고침")
                         refreshUsbDevices()
+                        refreshEthernetState()
                     },
+                    onAdminToggle = { adminMode.value = !adminMode.value },
                     onRequestPermission = ::requestUsbPermission,
                     onConnectSerial = ::connectSerial,
                     onDisconnectSerial = ::disconnectSerial,
@@ -127,6 +164,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         disconnectSerial()
+        unregisterEthernetCallback()
         unregisterReceiver(usbReceiver)
         super.onDestroy()
     }
@@ -160,6 +198,47 @@ class MainActivity : ComponentActivity() {
         } else {
             appendLog("감지된 USB 장치 ${snapshots.size}개")
         }
+    }
+
+    private fun registerEthernetCallback() {
+        val request = NetworkRequest.Builder()
+            .addTransportType(NetworkCapabilities.TRANSPORT_ETHERNET)
+            .build()
+        connectivityManager.registerNetworkCallback(request, ethernetCallback)
+    }
+
+    private fun unregisterEthernetCallback() {
+        runCatching { connectivityManager.unregisterNetworkCallback(ethernetCallback) }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun refreshEthernetState() {
+        val networks = connectivityManager.allNetworks.mapNotNull { network ->
+            val capabilities = connectivityManager.getNetworkCapabilities(network)
+            if (capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) != true) {
+                return@mapNotNull null
+            }
+            val linkProperties = connectivityManager.getLinkProperties(network)
+            val interfaceName = linkProperties?.interfaceName
+            val addresses = linkProperties?.linkAddresses
+                ?.map { it.address.hostAddress.orEmpty() }
+                ?.filter { it.isNotBlank() }
+                .orEmpty()
+            EthernetUiState(
+                connected = true,
+                interfaceName = interfaceName,
+                detail = listOfNotNull(
+                    interfaceName,
+                    addresses.takeIf { it.isNotEmpty() }?.joinToString(", ")
+                ).joinToString(" / ").ifBlank { "링크 감지" }
+            )
+        }
+
+        ethernetState.value = networks.firstOrNull() ?: EthernetUiState(
+            connected = false,
+            interfaceName = null,
+            detail = "랜선 링크 미감지"
+        )
     }
 
     private fun requestUsbPermission(device: UsbDeviceSnapshot) {
@@ -280,19 +359,49 @@ class MainActivity : ComponentActivity() {
 
         val raw32 = updateRaw32Candidate(data)
         if (raw32 != null) {
-            portState.value = portState.value.copy(
-                lastWiegand = raw32.summary,
-                lastRawHex = rawHex
-            )
-            return "수신 $rawHex / 32bit 카드 후보: ${raw32.summary}"
+            val stableRaw32 = markRaw32Candidate(raw32.dataHex)
+            portState.value = if (stableRaw32) {
+                portState.value.copy(
+                    lastWiegand = raw32.summary,
+                    rawWiegandStatus = null,
+                    lastCardHex = raw32.dataHex,
+                    lastRawHex = rawHex
+                )
+            } else {
+                portState.value.copy(
+                    rawWiegandStatus = "검증 전 ${raw32.summary}",
+                    lastRawHex = rawHex
+                )
+            }
+            return if (stableRaw32) {
+                "수신 $rawHex / 32bit 카드 확인: ${raw32.summary}"
+            } else {
+                "수신 $rawHex / 32bit 후보 반복 확인 중: ${raw32.summary}"
+            }
         }
 
-        portState.value = portState.value.copy(lastRawHex = rawHex)
+        portState.value = portState.value.copy(
+            rawWiegandStatus = if (data.size <= RAW_32_CARD_BYTES) {
+                "조각 수신 ${raw32Buffer.size}/4 bytes"
+            } else {
+                "원시 수신"
+            },
+            lastRawHex = rawHex
+        )
         return if (data.size <= RAW_32_CARD_BYTES) {
             "수신 $rawHex / 32bit 조각 수신: ${raw32Buffer.size}/4 bytes"
         } else {
             "수신 $rawHex / 원시 수신: $rawHex"
         }
+    }
+
+    private fun markRaw32Candidate(dataHex: String): Boolean {
+        val now = System.currentTimeMillis()
+        val sameCandidate = dataHex == lastRaw32CandidateHex && now - lastRaw32CandidateAt <= RAW_32_STABLE_WINDOW_MS
+        lastRaw32CandidateHex = dataHex
+        lastRaw32CandidateAt = now
+        lastRaw32CandidateCount = if (sameCandidate) lastRaw32CandidateCount + 1 else 1
+        return lastRaw32CandidateCount >= 2
     }
 
     private fun updateRaw32Candidate(data: ByteArray): WiegandInput? {
@@ -329,8 +438,11 @@ class MainActivity : ComponentActivity() {
         val rawHex = data.toHexString()
         portState.value = when (command) {
             AccessLinkProtocol.CMD_GET_WIEGAND_INPUT_DATA -> {
+                val decoded = AccessLinkProtocol.decodeWiegandInput(payload)
                 portState.value.copy(
-                    lastWiegand = AccessLinkProtocol.decodeWiegandInput(payload).summary,
+                    lastWiegand = decoded.summary,
+                    rawWiegandStatus = null,
+                    lastCardHex = decoded.dataHex,
                     lastRawHex = rawHex
                 )
             }
@@ -376,9 +488,12 @@ private fun ByteArray.isAccessLinkPacket(): Boolean {
 private fun UsbDiagnosticApp(
     devices: List<UsbDeviceSnapshot>,
     serialState: SerialUiState,
+    ethernetState: EthernetUiState,
     portState: PortDashboardState,
     logs: List<String>,
+    adminMode: Boolean,
     onRefresh: () -> Unit,
+    onAdminToggle: () -> Unit,
     onRequestPermission: (UsbDeviceSnapshot) -> Unit,
     onConnectSerial: (Int) -> Unit,
     onDisconnectSerial: () -> Unit,
@@ -400,50 +515,49 @@ private fun UsbDiagnosticApp(
                 HeaderCard(
                     connectedCount = devices.size,
                     permissionCount = devices.count { it.hasPermission },
+                    adminMode = adminMode,
+                    onAdminToggle = onAdminToggle,
                     onRefresh = onRefresh
                 )
             }
 
-            item {
-                StatusSummary(devices = devices)
-            }
-
-            item {
-                FieldPortDashboard(
-                    serialDevice = devices.firstOrNull { it.isAccessLinkSerial },
-                    lanDevice = devices.firstOrNull { it.isAccessLinkLan },
-                    serialState = serialState,
-                    portState = portState
-                )
-            }
-
-            item {
-                SerialControlCard(
-                    serialDevice = devices.firstOrNull { it.isAccessLinkSerial },
-                    serialState = serialState,
-                    onConnectSerial = onConnectSerial,
-                    onDisconnectSerial = onDisconnectSerial,
-                    onRequestPermission = onRequestPermission,
-                    onWiegandQuery = onWiegandQuery,
-                    onRelayCommand = onRelayCommand
-                )
-            }
-
-            if (devices.isEmpty()) {
+            if (adminMode) {
                 item {
-                    EmptyDeviceCard()
-                }
-            } else {
-                items(devices, key = { it.deviceName }) { device ->
-                    DeviceCard(
-                        device = device,
-                        onRequestPermission = { onRequestPermission(device) }
+                    AdminDiagnosticsScreen(
+                        devices = devices,
+                        serialState = serialState,
+                        ethernetState = ethernetState,
+                        portState = portState,
+                        logs = logs,
+                        onRequestPermission = onRequestPermission
                     )
                 }
-            }
+            } else {
+                item {
+                    FieldPortDashboard(
+                        serialDevice = devices.firstOrNull { it.isAccessLinkSerial },
+                        lanDevice = devices.firstOrNull { it.isAccessLinkLan },
+                        serialState = serialState,
+                        ethernetState = ethernetState,
+                        portState = portState
+                    )
+                }
 
-            item {
-                LogCard(logs = logs)
+                item {
+                    SerialControlCard(
+                        serialDevice = devices.firstOrNull { it.isAccessLinkSerial },
+                        serialState = serialState,
+                        onConnectSerial = onConnectSerial,
+                        onDisconnectSerial = onDisconnectSerial,
+                        onRequestPermission = onRequestPermission,
+                        onWiegandQuery = onWiegandQuery,
+                        onRelayCommand = onRelayCommand
+                    )
+                }
+
+                item {
+                    LogCard(logs = logs)
+                }
             }
         }
     }
@@ -453,6 +567,8 @@ private fun UsbDiagnosticApp(
 private fun HeaderCard(
     connectedCount: Int,
     permissionCount: Int,
+    adminMode: Boolean,
+    onAdminToggle: () -> Unit,
     onRefresh: () -> Unit
 ) {
     Card(
@@ -481,8 +597,13 @@ private fun HeaderCard(
                         color = Color(0xFFC7D2E1)
                     )
                 }
-                Button(onClick = onRefresh) {
-                    Text("새로고침")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = onAdminToggle) {
+                        Text(if (adminMode) "메인" else "관리자")
+                    }
+                    Button(onClick = onRefresh) {
+                        Text("새로고침")
+                    }
                 }
             }
 
@@ -527,6 +648,92 @@ private fun StatusSummary(devices: List<UsbDeviceSnapshot>) {
 }
 
 @Composable
+private fun AdminDiagnosticsScreen(
+    devices: List<UsbDeviceSnapshot>,
+    serialState: SerialUiState,
+    ethernetState: EthernetUiState,
+    portState: PortDashboardState,
+    logs: List<String>,
+    onRequestPermission: (UsbDeviceSnapshot) -> Unit
+) {
+    val serialDevice = devices.firstOrNull { it.isAccessLinkSerial }
+    val lanDevice = devices.firstOrNull { it.isAccessLinkLan }
+    val findings = buildDiagnosticFindings(
+        serialDevice = serialDevice,
+        lanDevice = lanDevice,
+        serialState = serialState,
+        ethernetState = ethernetState,
+        portState = portState
+    )
+
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        InfoCard {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("관리자 진단", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                findings.forEach { finding ->
+                    DiagnosticFindingRow(finding)
+                }
+            }
+        }
+
+        InfoCard {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("원본 데이터", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                DetailGrid(
+                    items = listOf(
+                        "Serial baudrate" to serialState.baudRate.toString(),
+                        "Serial 상태" to serialState.status,
+                        "Ethernet 링크" to ethernetState.detail,
+                        "카드 HEX" to (portState.lastCardHex ?: "-"),
+                        "원본 HEX" to (portState.lastRawHex ?: "-"),
+                        "Relay HEX" to (portState.lastRelayHex ?: "-")
+                    )
+                )
+            }
+        }
+
+        if (devices.isEmpty()) {
+            EmptyDeviceCard()
+        } else {
+            devices.forEach { device ->
+                DeviceCard(
+                    device = device,
+                    onRequestPermission = { onRequestPermission(device) }
+                )
+            }
+        }
+
+        LogCard(logs = logs, title = "전체 로그", limit = 80)
+    }
+}
+
+@Composable
+private fun DiagnosticFindingRow(finding: DiagnosticFinding) {
+    Surface(
+        color = Color(0xFFF8FAFC),
+        shape = RoundedCornerShape(8.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(5.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(finding.title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                StatusChip(finding.level, finding.color)
+            }
+            Text("위치: ${finding.area}", style = MaterialTheme.typography.bodySmall)
+            Text("근거: ${finding.evidence}", style = MaterialTheme.typography.bodySmall, color = Color(0xFF5B6472))
+            Text("다음: ${finding.nextStep}", style = MaterialTheme.typography.bodySmall, color = Color(0xFF5B6472))
+        }
+    }
+}
+
+@Composable
 private fun EmptyDeviceCard() {
     InfoCard {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -542,8 +749,13 @@ private fun FieldPortDashboard(
     serialDevice: UsbDeviceSnapshot?,
     lanDevice: UsbDeviceSnapshot?,
     serialState: SerialUiState,
+    ethernetState: EthernetUiState,
     portState: PortDashboardState
 ) {
+    val cardConfirmed = portState.lastWiegand != null
+    val digitalConfirmed = portState.input0 != null || portState.input1 != null
+    val rsConfirmed = portState.lastRs232 != null || portState.lastRs485 != null
+
     InfoCard {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("상태", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
@@ -551,7 +763,7 @@ private fun FieldPortDashboard(
             PortStatusRow(
                 title = "USB Serial",
                 description = "",
-                value = serialState.status,
+                value = serialDevice?.let { "${it.vendorIdHex}:${it.productIdHex} / ${serialState.status}" } ?: "CH340 미감지",
                 status = when {
                     serialDevice == null -> "미감지"
                     !serialDevice.hasPermission -> "권한 필요"
@@ -566,35 +778,59 @@ private fun FieldPortDashboard(
             )
 
             PortStatusRow(
-                title = "Ethernet",
+                title = "USB LAN 장치",
                 description = "",
                 value = lanDevice?.let { "${it.vendorIdHex}:${it.productIdHex}" } ?: "장치 미감지",
-                status = if (lanDevice != null) "감지" else "미감지",
-                color = if (lanDevice != null) PassGreen else WaitGray
+                status = if (lanDevice != null) "장치 감지" else "미감지",
+                color = if (lanDevice != null) ActiveBlue else WaitGray
             )
 
             PortStatusRow(
-                title = "카드",
+                title = "Ethernet 링크",
                 description = "",
-                value = portState.lastWiegand ?: "32bit 카드 태그 대기",
-                status = if (portState.lastWiegand != null) "수신" else "대기",
-                color = if (portState.lastWiegand != null) PassGreen else WaitGray
+                value = ethernetState.detail,
+                status = if (ethernetState.connected) "링크 감지" else "미감지",
+                color = if (ethernetState.connected) PassGreen else WaitGray
+            )
+
+            PortStatusRow(
+                title = "Wiegand",
+                description = "",
+                value = portState.rawWiegandStatus ?: portState.lastCardHex?.let { "카드 HEX $it" } ?: "미수신",
+                status = when {
+                    cardConfirmed -> "통신 확인"
+                    portState.rawWiegandStatus != null -> "검증 전"
+                    else -> "미확인"
+                },
+                color = when {
+                    cardConfirmed -> PassGreen
+                    portState.rawWiegandStatus != null -> ActiveBlue
+                    else -> WaitGray
+                }
+            )
+
+            PortStatusRow(
+                title = "카드 데이터",
+                description = "",
+                value = portState.lastWiegand ?: "미확정",
+                status = if (cardConfirmed) "확정" else "미확정",
+                color = if (cardConfirmed) PassGreen else WaitGray
             )
 
             PortStatusRow(
                 title = "Digital Input",
                 description = "",
                 value = "IN0 ${portState.input0 ?: "미확인"} / IN1 ${portState.input1 ?: "미확인"}",
-                status = if (portState.input0 != null || portState.input1 != null) "변화 감지" else "대기",
-                color = if (portState.input0 != null || portState.input1 != null) ActiveBlue else WaitGray
+                status = if (digitalConfirmed) "통신 확인" else "미확인",
+                color = if (digitalConfirmed) ActiveBlue else WaitGray
             )
 
             PortStatusRow(
                 title = "RS-232 / RS-485",
                 description = "",
                 value = "232 ${portState.lastRs232 ?: "-"} / 485 ${portState.lastRs485 ?: "-"}",
-                status = if (portState.lastRs232 != null || portState.lastRs485 != null) "수신" else "대기",
-                color = if (portState.lastRs232 != null || portState.lastRs485 != null) PassGreen else WaitGray
+                status = if (rsConfirmed) "통신 확인" else "미확인",
+                color = if (rsConfirmed) PassGreen else WaitGray
             )
 
             PortStatusRow(
@@ -605,18 +841,6 @@ private fun FieldPortDashboard(
                 color = if (serialState.connected) ActiveBlue else WaitGray
             )
 
-            if (portState.lastRawHex != null) {
-                Surface(
-                    color = Color(0xFFF0F4F8),
-                    shape = RoundedCornerShape(8.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text("마지막 원본 수신 HEX", style = MaterialTheme.typography.labelLarge, color = Color(0xFF5B6472))
-                        Text(portState.lastRawHex, style = MaterialTheme.typography.bodySmall)
-                    }
-                }
-            }
         }
     }
 }
@@ -853,14 +1077,18 @@ private fun InterfaceSection(usbInterface: UsbInterfaceSnapshot) {
 }
 
 @Composable
-private fun LogCard(logs: List<String>) {
+private fun LogCard(
+    logs: List<String>,
+    title: String = "로그",
+    limit: Int = 12
+) {
     InfoCard {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("로그", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             if (logs.isEmpty()) {
                 Text("대기")
             } else {
-                logs.take(12).forEach { log ->
+                logs.take(limit).forEach { log ->
                     Text(log, style = MaterialTheme.typography.bodySmall)
                 }
             }
@@ -978,14 +1206,199 @@ private inline fun safeValue(block: () -> String?): String {
     }
 }
 
+private fun buildDiagnosticFindings(
+    serialDevice: UsbDeviceSnapshot?,
+    lanDevice: UsbDeviceSnapshot?,
+    serialState: SerialUiState,
+    ethernetState: EthernetUiState,
+    portState: PortDashboardState
+): List<DiagnosticFinding> {
+    val findings = mutableListOf<DiagnosticFinding>()
+
+    when {
+        serialDevice == null -> findings += DiagnosticFinding(
+            level = "확정",
+            area = "ACCESS LINK / USB Serial",
+            title = "CH340 USB Serial 미감지",
+            evidence = "VID 0x1A86 / PID 0x7523 장치가 Android USB 목록에 없음",
+            nextStep = "폰과 ACCESS LINK USB-C 연결 상태를 확인",
+            color = FailRed
+        )
+
+        !serialDevice.hasPermission -> findings += DiagnosticFinding(
+            level = "확정",
+            area = "앱 권한",
+            title = "USB Serial 권한 없음",
+            evidence = "CH340 장치는 감지됐지만 Android USB 권한이 없음",
+            nextStep = "USB 권한 요청 승인",
+            color = FailRed
+        )
+
+        serialState.connected -> findings += DiagnosticFinding(
+            level = "정상",
+            area = "USB Serial",
+            title = "Serial 연결됨",
+            evidence = serialState.status,
+            nextStep = "Wiegand, RS-232, RS-485, Digital Input 수신 확인",
+            color = PassGreen
+        )
+
+        else -> findings += DiagnosticFinding(
+            level = "확인 필요",
+            area = "앱 조작",
+            title = "Serial 미연결",
+            evidence = "CH340 장치와 권한은 확인됐지만 Serial 포트가 열려 있지 않음",
+            nextStep = "9600bps 연결 실행",
+            color = ActiveBlue
+        )
+    }
+
+    when {
+        lanDevice == null -> findings += DiagnosticFinding(
+            level = "확정",
+            area = "ACCESS LINK / USB LAN",
+            title = "USB LAN 장치 미감지",
+            evidence = "VID 0x0BDA / PID 0x8152 장치가 Android USB 목록에 없음",
+            nextStep = "ACCESS LINK USB 연결 상태 확인",
+            color = FailRed
+        )
+
+        ethernetState.connected -> findings += DiagnosticFinding(
+            level = "정상",
+            area = "Ethernet",
+            title = "Ethernet 링크 감지",
+            evidence = ethernetState.detail,
+            nextStep = "네트워크 통신 테스트 진행",
+            color = PassGreen
+        )
+
+        else -> findings += DiagnosticFinding(
+            level = "확정",
+            area = "Ethernet",
+            title = "Ethernet 링크 미감지",
+            evidence = "USB LAN 장치는 감지됐지만 Android Ethernet 링크가 없음",
+            nextStep = "랜선 연결과 상대 장비 포트 링크 상태 확인",
+            color = FailRed
+        )
+    }
+
+    when {
+        portState.lastWiegand != null -> findings += DiagnosticFinding(
+            level = "정상",
+            area = "Wiegand",
+            title = "카드 데이터 확정",
+            evidence = portState.lastWiegand,
+            nextStep = "같은 카드 반복 태그로 값 일치 확인",
+            color = PassGreen
+        )
+
+        portState.rawWiegandStatus != null -> findings += DiagnosticFinding(
+            level = "확인 필요",
+            area = "Wiegand",
+            title = "카드 데이터 미확정",
+            evidence = portState.rawWiegandStatus,
+            nextStep = "같은 카드를 3회 태그하고 값 반복 일치 여부 확인",
+            color = ActiveBlue
+        )
+
+        else -> findings += DiagnosticFinding(
+            level = "확인 필요",
+            area = "Wiegand",
+            title = "Wiegand 수신 없음",
+            evidence = "앱에서 Wiegand 수신 데이터를 아직 관측하지 못함",
+            nextStep = "Serial 연결 후 카드 태그 또는 Wiegand 입력 조회",
+            color = WaitGray
+        )
+    }
+
+    if (portState.lastRs232 != null || portState.lastRs485 != null) {
+        findings += DiagnosticFinding(
+            level = "정상",
+            area = "RS-232 / RS-485",
+            title = "시리얼 포트 데이터 수신",
+            evidence = "RS-232 ${portState.lastRs232 ?: "-"} / RS-485 ${portState.lastRs485 ?: "-"}",
+            nextStep = "프로토콜별 payload 해석 확인",
+            color = PassGreen
+        )
+    } else {
+        findings += DiagnosticFinding(
+            level = "확인 필요",
+            area = "RS-232 / RS-485",
+            title = "시리얼 포트 수신 없음",
+            evidence = "앱에서 RS-232/RS-485 수신 데이터를 아직 관측하지 못함",
+            nextStep = "상대 장비 송신 상태와 포트 선택 확인",
+            color = WaitGray
+        )
+    }
+
+    if (portState.input0 != null || portState.input1 != null) {
+        findings += DiagnosticFinding(
+            level = "정상",
+            area = "Digital Input",
+            title = "Digital Input 상태 수신",
+            evidence = "IN0 ${portState.input0 ?: "-"} / IN1 ${portState.input1 ?: "-"}",
+            nextStep = "입력 접점 ON/OFF 변화 확인",
+            color = PassGreen
+        )
+    } else {
+        findings += DiagnosticFinding(
+            level = "확인 필요",
+            area = "Digital Input",
+            title = "Digital Input 상태 미수신",
+            evidence = "앱에서 IN0/IN1 상태 데이터를 아직 관측하지 못함",
+            nextStep = "입력 조회 또는 접점 변화 테스트",
+            color = WaitGray
+        )
+    }
+
+    if (portState.lastRelayHex != null) {
+        findings += DiagnosticFinding(
+            level = "정상",
+            area = "Relay",
+            title = "Relay 명령 송신 기록 있음",
+            evidence = portState.lastRelayHex,
+            nextStep = "외부 부하 동작 여부는 현장에서 별도 확인",
+            color = PassGreen
+        )
+    } else {
+        findings += DiagnosticFinding(
+            level = "확인 필요",
+            area = "Relay",
+            title = "Relay 명령 송신 기록 없음",
+            evidence = "앱 실행 후 Relay ON/OFF 명령 기록이 없음",
+            nextStep = "Relay 1 또는 Relay 2 ON/OFF 테스트",
+            color = WaitGray
+        )
+    }
+
+    return findings
+}
+
+private data class DiagnosticFinding(
+    val level: String,
+    val area: String,
+    val title: String,
+    val evidence: String,
+    val nextStep: String,
+    val color: Color
+)
+
 private data class SerialUiState(
     val connected: Boolean = false,
     val baudRate: Int = 9600,
     val status: String = "연결 안 됨"
 )
 
+private data class EthernetUiState(
+    val connected: Boolean = false,
+    val interfaceName: String? = null,
+    val detail: String = "랜선 링크 미감지"
+)
+
 private data class PortDashboardState(
     val lastWiegand: String? = null,
+    val rawWiegandStatus: String? = null,
+    val lastCardHex: String? = null,
     val lastRs232: String? = null,
     val lastRs485: String? = null,
     val input0: String? = null,
@@ -1149,6 +1562,7 @@ private fun UsbDiagnosticPreview() {
         UsbDiagnosticApp(
             devices = listOf(previewDevice),
             serialState = SerialUiState(connected = true, baudRate = 9600, status = "연결됨: 9600bps"),
+            ethernetState = EthernetUiState(connected = true, interfaceName = "eth0", detail = "eth0 / 192.168.0.10"),
             portState = PortDashboardState(
                 lastWiegand = "32bit / Decimal 131654 / Data 00 02 02 46",
                 input0 = "Released",
@@ -1156,7 +1570,9 @@ private fun UsbDiagnosticPreview() {
                 lastRawHex = "00 02 02 46"
             ),
             logs = listOf("[12:00:00] 미리보기 로그"),
+            adminMode = false,
             onRefresh = {},
+            onAdminToggle = {},
             onRequestPermission = {},
             onConnectSerial = {},
             onDisconnectSerial = {},
