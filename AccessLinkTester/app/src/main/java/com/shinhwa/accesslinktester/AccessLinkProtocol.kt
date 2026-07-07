@@ -64,11 +64,101 @@ object AccessLinkProtocol {
             CMD_GET_INPUT_PORT_1 -> "Input 1"
             else -> "알 수 없는 명령 0x${command.toString(16).uppercase().padStart(2, '0')}"
         }
+        if (command == CMD_GET_WIEGAND_INPUT_DATA) {
+            return "$name / ${decodeWiegandInput(data).summary}"
+        }
         return "$name / Data ${data.toHexString()}"
+    }
+
+    fun decodeWiegandInput(payload: ByteArray): WiegandInput {
+        val bitLength = when (payload.size) {
+            8 -> 26
+            10 -> 34
+            else -> null
+        }
+        val dataBytes = payload.asAsciiHexBytesOrSelf()
+        val rawValue = dataBytes.fold(0L) { value, byte ->
+            (value shl 8) or (byte.toLong() and 0xFF)
+        }
+
+        val decimalCode = when (bitLength) {
+            26 -> (rawValue and 0x03FF_FFFFL) ushr 1
+            34 -> (rawValue and 0x3_FFFF_FFFFL) ushr 1
+            else -> null
+        }
+        val facilityCode = when (bitLength) {
+            26 -> decimalCode?.ushr(16)?.and(0xFF)
+            34 -> decimalCode?.ushr(16)?.and(0xFFFF)
+            else -> null
+        }
+        val cardNumber = decimalCode?.and(0xFFFF)
+
+        return WiegandInput(
+            bitLength = bitLength,
+            payloadHex = payload.toHexString(),
+            dataHex = dataBytes.toHexString(),
+            facilityCode = facilityCode,
+            cardNumber = cardNumber,
+            decimalCode = decimalCode,
+            raw32Decimal = dataBytes.takeIf { it.size == 4 }?.fold(0L) { value, byte ->
+                (value shl 8) or (byte.toLong() and 0xFF)
+            }
+        )
+    }
+
+    fun decodeRaw32Input(data: ByteArray): WiegandInput? {
+        if (data.size != 4) return null
+        val raw32Decimal = data.fold(0L) { value, byte ->
+            (value shl 8) or (byte.toLong() and 0xFF)
+        }
+        return WiegandInput(
+            bitLength = 32,
+            payloadHex = data.toHexString(),
+            dataHex = data.toHexString(),
+            facilityCode = null,
+            cardNumber = null,
+            decimalCode = null,
+            raw32Decimal = raw32Decimal
+        )
     }
 
     private fun Int.asciiDigit(): Byte {
         return ('0'.code + this).toByte()
+    }
+}
+
+data class WiegandInput(
+    val bitLength: Int?,
+    val payloadHex: String,
+    val dataHex: String,
+    val facilityCode: Long?,
+    val cardNumber: Long?,
+    val decimalCode: Long?,
+    val raw32Decimal: Long?
+) {
+    val summary: String
+        get() {
+            val type = bitLength?.let { "${it}bit" } ?: "Unknown"
+            val raw32Text = raw32Decimal?.let { " / 32bit Decimal $it" }.orEmpty()
+            if (bitLength == 32 && raw32Decimal != null) {
+                return "32bit / Decimal $raw32Decimal / Data $dataHex"
+            }
+            if (decimalCode == null || facilityCode == null || cardNumber == null) {
+                return "$type / Raw $payloadHex$raw32Text"
+            }
+            return "$type / Card $cardNumber / FC $facilityCode / Decimal $decimalCode$raw32Text / Data $dataHex"
+        }
+}
+
+private fun ByteArray.asAsciiHexBytesOrSelf(): ByteArray {
+    val chars = map { it.toInt() and 0xFF }
+    if (chars.isEmpty() || chars.size % 2 != 0) return this
+    if (!chars.all { it in '0'.code..'9'.code || it in 'A'.code..'F'.code || it in 'a'.code..'f'.code }) {
+        return this
+    }
+    val hex = chars.map { it.toChar() }.joinToString("")
+    return ByteArray(hex.length / 2) { index ->
+        hex.substring(index * 2, index * 2 + 2).toInt(16).toByte()
     }
 }
 
