@@ -61,6 +61,7 @@ class MainActivity : ComponentActivity() {
     private val usbDevices = mutableStateListOf<UsbDeviceSnapshot>()
     private val logs = mutableStateListOf<String>()
     private val serialState = mutableStateOf(SerialUiState())
+    private val portState = mutableStateOf(PortDashboardState())
     private var serialController: AccessLinkSerialController? = null
 
     private val usbReceiver = object : BroadcastReceiver() {
@@ -104,6 +105,7 @@ class MainActivity : ComponentActivity() {
                 UsbDiagnosticApp(
                     devices = usbDevices,
                     serialState = serialState.value,
+                    portState = portState.value,
                     logs = logs,
                     onRefresh = {
                         appendLog("USB 장치 목록 새로고침")
@@ -203,6 +205,7 @@ class MainActivity : ComponentActivity() {
                 onLog = { message -> runOnUiThread { appendLog(message) } },
                 onReceive = { data ->
                     runOnUiThread {
+                        updatePortState(data)
                         appendLog("수신 ${data.toHexString()} / ${AccessLinkProtocol.describeIncoming(data)}")
                     }
                 }
@@ -245,6 +248,48 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun updatePortState(data: ByteArray) {
+        if (data.size < 4 || data.first() != 0x02.toByte() || data.last() != 0x03.toByte()) {
+            portState.value = portState.value.copy(lastRawHex = data.toHexString())
+            return
+        }
+
+        val command = data[2].toInt() and 0xFF
+        val payload = data.copyOfRange(3, data.size - 1)
+        val rawHex = data.toHexString()
+        portState.value = when (command) {
+            AccessLinkProtocol.CMD_GET_WIEGAND_INPUT_DATA -> {
+                val bitLength = when (payload.size) {
+                    8 -> "26bit"
+                    10 -> "34bit"
+                    else -> "${payload.size} bytes"
+                }
+                portState.value.copy(
+                    lastWiegand = "${payload.toDisplayText()} ($bitLength)",
+                    lastRawHex = rawHex
+                )
+            }
+
+            AccessLinkProtocol.CMD_GET_RECV_DATA_RS232 -> {
+                portState.value.copy(lastRs232 = payload.toHexString(), lastRawHex = rawHex)
+            }
+
+            AccessLinkProtocol.CMD_GET_RECV_DATA_RS485 -> {
+                portState.value.copy(lastRs485 = payload.toHexString(), lastRawHex = rawHex)
+            }
+
+            AccessLinkProtocol.CMD_GET_INPUT_PORT_0 -> {
+                portState.value.copy(input0 = payload.toInputStatus(), lastRawHex = rawHex)
+            }
+
+            AccessLinkProtocol.CMD_GET_INPUT_PORT_1 -> {
+                portState.value.copy(input1 = payload.toInputStatus(), lastRawHex = rawHex)
+            }
+
+            else -> portState.value.copy(lastRawHex = rawHex)
+        }
+    }
+
     private fun appendLog(message: String) {
         val time = SimpleDateFormat("HH:mm:ss", Locale.KOREA).format(Date())
         logs.add(0, "[$time] $message")
@@ -258,6 +303,7 @@ class MainActivity : ComponentActivity() {
 private fun UsbDiagnosticApp(
     devices: List<UsbDeviceSnapshot>,
     serialState: SerialUiState,
+    portState: PortDashboardState,
     logs: List<String>,
     onRefresh: () -> Unit,
     onRequestPermission: (UsbDeviceSnapshot) -> Unit,
@@ -286,6 +332,15 @@ private fun UsbDiagnosticApp(
 
             item {
                 StatusSummary(devices = devices)
+            }
+
+            item {
+                FieldPortDashboard(
+                    serialDevice = devices.firstOrNull { it.isAccessLinkSerial },
+                    lanDevice = devices.firstOrNull { it.isAccessLinkLan },
+                    serialState = serialState,
+                    portState = portState
+                )
             }
 
             item {
@@ -403,6 +458,123 @@ private fun EmptyDeviceCard() {
             Text("연결 안내", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             Text("ACCESS LINK의 USB-C 포트를 Android 휴대폰에 연결한 뒤 새로고침을 누르세요.")
             Text("장치가 표시되면 권한 요청 버튼으로 Vendor ID, Product ID, Interface 정보를 확인할 수 있습니다.")
+        }
+    }
+}
+
+@Composable
+private fun FieldPortDashboard(
+    serialDevice: UsbDeviceSnapshot?,
+    lanDevice: UsbDeviceSnapshot?,
+    serialState: SerialUiState,
+    portState: PortDashboardState
+) {
+    InfoCard {
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text("현장 포트 대시보드", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Text(
+                "장비 상단 표기 기준으로 Wiegand, Relay, Digital Input, RS-232/485, Ethernet 상태를 확인합니다.",
+                style = MaterialTheme.typography.bodySmall,
+                color = Color(0xFF5B6472)
+            )
+
+            PortStatusRow(
+                title = "USB-C 제어 통신",
+                description = "CH340 Serial, 릴레이/입력/리더기 데이터 통신",
+                value = serialState.status,
+                status = when {
+                    serialDevice == null -> "미감지"
+                    !serialDevice.hasPermission -> "권한 필요"
+                    serialState.connected -> "연결"
+                    else -> "대기"
+                },
+                color = when {
+                    serialState.connected -> PassGreen
+                    serialDevice == null -> FailRed
+                    else -> ActiveBlue
+                }
+            )
+
+            PortStatusRow(
+                title = "Ethernet",
+                description = "Realtek USB LAN, 네트워크 통신 확인용",
+                value = lanDevice?.let { "${it.vendorIdHex}:${it.productIdHex}" } ?: "장치 미감지",
+                status = if (lanDevice != null) "감지" else "미감지",
+                color = if (lanDevice != null) PassGreen else WaitGray
+            )
+
+            PortStatusRow(
+                title = "Wiegand IN",
+                description = "리더기 D0/D1/GND 입력, 26/34bit 카드 수신",
+                value = portState.lastWiegand ?: "카드 태그 대기",
+                status = if (portState.lastWiegand != null) "수신" else "대기",
+                color = if (portState.lastWiegand != null) PassGreen else WaitGray
+            )
+
+            PortStatusRow(
+                title = "Digital Input",
+                description = "IN0+/IN0-, IN1+/IN1- 접점 입력",
+                value = "IN0 ${portState.input0 ?: "미확인"} / IN1 ${portState.input1 ?: "미확인"}",
+                status = if (portState.input0 != null || portState.input1 != null) "변화 감지" else "대기",
+                color = if (portState.input0 != null || portState.input1 != null) ActiveBlue else WaitGray
+            )
+
+            PortStatusRow(
+                title = "RS-232 / RS-485",
+                description = "외부 시리얼 장비 송수신 로그",
+                value = "232 ${portState.lastRs232 ?: "-"} / 485 ${portState.lastRs485 ?: "-"}",
+                status = if (portState.lastRs232 != null || portState.lastRs485 != null) "수신" else "대기",
+                color = if (portState.lastRs232 != null || portState.lastRs485 != null) PassGreen else WaitGray
+            )
+
+            PortStatusRow(
+                title = "Relay Output 1/2",
+                description = "NC/COM/NO 접점 출력, 앱 버튼으로 ON/OFF 테스트",
+                value = "릴레이 명령은 아래 제어 테스트에서 실행",
+                status = if (serialState.connected) "테스트 가능" else "Serial 필요",
+                color = if (serialState.connected) ActiveBlue else WaitGray
+            )
+
+            if (portState.lastRawHex != null) {
+                Surface(
+                    color = Color(0xFFF0F4F8),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("마지막 원본 수신 HEX", style = MaterialTheme.typography.labelLarge, color = Color(0xFF5B6472))
+                        Text(portState.lastRawHex, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PortStatusRow(
+    title: String,
+    description: String,
+    value: String,
+    status: String,
+    color: Color
+) {
+    Surface(
+        color = Color(0xFFF8FAFC),
+        shape = RoundedCornerShape(8.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier.padding(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                Text(description, style = MaterialTheme.typography.bodySmall, color = Color(0xFF5B6472))
+                Text(value, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
+            }
+            StatusChip(status, color)
         }
     }
 }
@@ -729,6 +901,15 @@ private data class SerialUiState(
     val status: String = "연결 안 됨"
 )
 
+private data class PortDashboardState(
+    val lastWiegand: String? = null,
+    val lastRs232: String? = null,
+    val lastRs485: String? = null,
+    val input0: String? = null,
+    val input1: String? = null,
+    val lastRawHex: String? = null
+)
+
 private data class UsbDeviceSnapshot(
     val deviceName: String,
     val vendorId: Int,
@@ -806,6 +987,23 @@ private fun Int.toUsbHex(): String {
     return "0x${toString(16).uppercase(Locale.US).padStart(4, '0')}"
 }
 
+private fun ByteArray.toDisplayText(): String {
+    val asciiText = map { it.toInt() and 0xFF }
+        .takeIf { values -> values.all { it in 0x20..0x7E } }
+        ?.map { it.toChar() }
+        ?.joinToString("")
+    return asciiText?.ifBlank { null } ?: toHexString()
+}
+
+private fun ByteArray.toInputStatus(): String {
+    val value = firstOrNull()?.toInt()?.and(0xFF) ?: return "미확인"
+    return when (value) {
+        0, '0'.code -> "Released"
+        1, '1'.code -> "Pressed"
+        else -> "Unknown ${toHexString()}"
+    }
+}
+
 private fun usbClassName(value: Int): String {
     return when (value) {
         UsbConstants.USB_CLASS_APP_SPEC -> "Application Specific"
@@ -865,6 +1063,12 @@ private fun UsbDiagnosticPreview() {
         UsbDiagnosticApp(
             devices = listOf(previewDevice),
             serialState = SerialUiState(connected = true, baudRate = 9600, status = "연결됨: 9600bps"),
+            portState = PortDashboardState(
+                lastWiegand = "12345678 (26bit)",
+                input0 = "Released",
+                input1 = "Pressed",
+                lastRawHex = "02 0C 09 31 32 33 34 35 36 37 38 03"
+            ),
             logs = listOf("[12:00:00] 미리보기 로그"),
             onRefresh = {},
             onRequestPermission = {},
