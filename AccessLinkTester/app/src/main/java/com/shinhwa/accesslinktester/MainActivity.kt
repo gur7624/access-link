@@ -118,6 +118,7 @@ class MainActivity : ComponentActivity() {
                     onRequestPermission = ::requestUsbPermission,
                     onConnectSerial = ::connectSerial,
                     onDisconnectSerial = ::disconnectSerial,
+                    onWiegandQuery = ::sendWiegandQuery,
                     onRelayCommand = ::sendRelayCommand
                 )
             }
@@ -245,9 +246,27 @@ class MainActivity : ComponentActivity() {
         try {
             val controller = serialController ?: error("Serial 연결이 필요합니다.")
             controller.write(packet)
+            val relayState = if (outputType == 1) "ON 송신" else "OFF 송신"
+            portState.value = portState.value.copy(
+                relay0 = if (useRelay == 0 || useRelay == 1) relayState else portState.value.relay0,
+                relay1 = if (useRelay == 0 || useRelay == 2) relayState else portState.value.relay1,
+                lastRelayHex = packet.toHexString()
+            )
             appendLog("송신 ${packet.toHexString()}")
         } catch (exception: Exception) {
             appendLog("릴레이 명령 실패: ${exception.message ?: "알 수 없는 오류"}")
+        }
+    }
+
+    private fun sendWiegandQuery() {
+        val packet = AccessLinkProtocol.getWiegandInputData()
+        try {
+            val controller = serialController ?: error("Serial 연결이 필요합니다.")
+            controller.write(packet)
+            raw32Buffer.clear()
+            appendLog("Wiegand 입력 조회 송신 ${packet.toHexString()}")
+        } catch (exception: Exception) {
+            appendLog("Wiegand 입력 조회 실패: ${exception.message ?: "알 수 없는 오류"}")
         }
     }
 
@@ -332,6 +351,10 @@ class MainActivity : ComponentActivity() {
                 portState.value.copy(input1 = payload.toInputStatus(), lastRawHex = rawHex)
             }
 
+            AccessLinkProtocol.CMD_SET_RELAY_CONTROL -> {
+                portState.value.copy(lastRelayHex = rawHex, lastRawHex = rawHex)
+            }
+
             else -> portState.value.copy(lastRawHex = rawHex)
         }
     }
@@ -359,6 +382,7 @@ private fun UsbDiagnosticApp(
     onRequestPermission: (UsbDeviceSnapshot) -> Unit,
     onConnectSerial: (Int) -> Unit,
     onDisconnectSerial: () -> Unit,
+    onWiegandQuery: () -> Unit,
     onRelayCommand: (Int, Int, Int) -> Unit
 ) {
     Scaffold(
@@ -400,6 +424,7 @@ private fun UsbDiagnosticApp(
                     onConnectSerial = onConnectSerial,
                     onDisconnectSerial = onDisconnectSerial,
                     onRequestPermission = onRequestPermission,
+                    onWiegandQuery = onWiegandQuery,
                     onRelayCommand = onRelayCommand
                 )
             }
@@ -436,22 +461,22 @@ private fun HeaderCard(
     ) {
         Column(
             modifier = Modifier.padding(18.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+            verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Text(
-                        text = "ACCESS LINK USB 진단",
+                        text = "ACCESS LINK",
                         style = MaterialTheme.typography.titleLarge,
                         color = Color.White,
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = "현장 장비 인식 상태를 확인합니다",
+                        text = "USB 진단",
                         style = MaterialTheme.typography.bodyMedium,
                         color = Color(0xFFC7D2E1)
                     )
@@ -462,10 +487,10 @@ private fun HeaderCard(
             }
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                StatusChip("감지 $connectedCount", if (connectedCount > 0) PassGreen else WaitGray)
+                StatusChip("USB $connectedCount", if (connectedCount > 0) PassGreen else WaitGray)
                 StatusChip("권한 $permissionCount", if (permissionCount > 0) ActiveBlue else WaitGray)
                 StatusChip(
-                    text = if (connectedCount > 0) "확인 필요" else "대기",
+                    text = if (connectedCount > 0) "READY" else "WAIT",
                     color = if (connectedCount > 0) ActiveBlue else WaitGray
                 )
             }
@@ -493,7 +518,7 @@ private fun StatusSummary(devices: List<UsbDeviceSnapshot>) {
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text("전체 상태", style = MaterialTheme.typography.labelLarge, color = Color(0xFF5B6472))
+                Text("상태", style = MaterialTheme.typography.labelLarge, color = Color(0xFF5B6472))
                 Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             }
             StatusChip(text = if (devices.any { it.hasPermission }) "PASS" else "CHECK", color = color)
@@ -521,16 +546,11 @@ private fun FieldPortDashboard(
 ) {
     InfoCard {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("현장 포트 대시보드", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            Text(
-                "장비 상단 표기 기준으로 Wiegand, Relay, Digital Input, RS-232/485, Ethernet 상태를 확인합니다.",
-                style = MaterialTheme.typography.bodySmall,
-                color = Color(0xFF5B6472)
-            )
+            Text("상태", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
 
             PortStatusRow(
-                title = "USB-C 제어 통신",
-                description = "CH340 Serial, 릴레이/입력/리더기 데이터 통신",
+                title = "USB Serial",
+                description = "",
                 value = serialState.status,
                 status = when {
                     serialDevice == null -> "미감지"
@@ -547,23 +567,23 @@ private fun FieldPortDashboard(
 
             PortStatusRow(
                 title = "Ethernet",
-                description = "Realtek USB LAN, 네트워크 통신 확인용",
+                description = "",
                 value = lanDevice?.let { "${it.vendorIdHex}:${it.productIdHex}" } ?: "장치 미감지",
                 status = if (lanDevice != null) "감지" else "미감지",
                 color = if (lanDevice != null) PassGreen else WaitGray
             )
 
             PortStatusRow(
-                title = "Wiegand IN",
-                description = "리더기 D0/D1/GND 입력, 26/34bit 카드 수신",
-                value = portState.lastWiegand ?: "카드 태그 대기",
+                title = "카드",
+                description = "",
+                value = portState.lastWiegand ?: "32bit 카드 태그 대기",
                 status = if (portState.lastWiegand != null) "수신" else "대기",
                 color = if (portState.lastWiegand != null) PassGreen else WaitGray
             )
 
             PortStatusRow(
                 title = "Digital Input",
-                description = "IN0+/IN0-, IN1+/IN1- 접점 입력",
+                description = "",
                 value = "IN0 ${portState.input0 ?: "미확인"} / IN1 ${portState.input1 ?: "미확인"}",
                 status = if (portState.input0 != null || portState.input1 != null) "변화 감지" else "대기",
                 color = if (portState.input0 != null || portState.input1 != null) ActiveBlue else WaitGray
@@ -571,16 +591,16 @@ private fun FieldPortDashboard(
 
             PortStatusRow(
                 title = "RS-232 / RS-485",
-                description = "외부 시리얼 장비 송수신 로그",
+                description = "",
                 value = "232 ${portState.lastRs232 ?: "-"} / 485 ${portState.lastRs485 ?: "-"}",
                 status = if (portState.lastRs232 != null || portState.lastRs485 != null) "수신" else "대기",
                 color = if (portState.lastRs232 != null || portState.lastRs485 != null) PassGreen else WaitGray
             )
 
             PortStatusRow(
-                title = "Relay Output 1/2",
-                description = "NC/COM/NO 접점 출력, 앱 버튼으로 ON/OFF 테스트",
-                value = "릴레이 명령은 아래 제어 테스트에서 실행",
+                title = "Relay",
+                description = "",
+                value = "R0 ${portState.relay0 ?: "-"} / R1 ${portState.relay1 ?: "-"}",
                 status = if (serialState.connected) "테스트 가능" else "Serial 필요",
                 color = if (serialState.connected) ActiveBlue else WaitGray
             )
@@ -621,7 +641,9 @@ private fun PortStatusRow(
         ) {
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
-                Text(description, style = MaterialTheme.typography.bodySmall, color = Color(0xFF5B6472))
+                if (description.isNotBlank()) {
+                    Text(description, style = MaterialTheme.typography.bodySmall, color = Color(0xFF5B6472))
+                }
                 Text(value, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
             }
             StatusChip(status, color)
@@ -636,6 +658,7 @@ private fun SerialControlCard(
     onConnectSerial: (Int) -> Unit,
     onDisconnectSerial: () -> Unit,
     onRequestPermission: (UsbDeviceSnapshot) -> Unit,
+    onWiegandQuery: () -> Unit,
     onRelayCommand: (Int, Int, Int) -> Unit
 ) {
     InfoCard {
@@ -646,7 +669,7 @@ private fun SerialControlCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("ACCESS LINK 제어 테스트", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    Text("제어", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                     Text(serialState.status, style = MaterialTheme.typography.bodySmall, color = Color(0xFF5B6472))
                 }
                 StatusChip(
@@ -656,7 +679,7 @@ private fun SerialControlCard(
             }
 
             if (serialDevice == null) {
-                Text("CH340 USB Serial 장치가 감지되면 릴레이 테스트를 시작할 수 있습니다.")
+                Text("CH340 미감지")
                 return@InfoCard
             }
 
@@ -669,19 +692,29 @@ private fun SerialControlCard(
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 Button(onClick = { onConnectSerial(9600) }, modifier = Modifier.weight(1f)) {
-                    Text("9600 연결")
+                    Text("9600")
                 }
                 Button(onClick = { onConnectSerial(115200) }, modifier = Modifier.weight(1f)) {
-                    Text("115200 연결")
+                    Text("115200")
                 }
             }
+
+            Text(
+                "Serial 속도",
+                style = MaterialTheme.typography.bodySmall,
+                color = Color(0xFF5B6472)
+            )
 
             if (serialState.connected) {
                 Button(onClick = onDisconnectSerial, modifier = Modifier.fillMaxWidth()) {
                     Text("Serial 연결 해제")
                 }
 
-                Text("릴레이 테스트", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                Button(onClick = onWiegandQuery, modifier = Modifier.fillMaxWidth()) {
+                    Text("Wiegand 입력 조회")
+                }
+
+                Text("Relay", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
                 RelayButtonRow(
                     title = "Relay 0",
                     onOn = { onRelayCommand(1, 1, 0) },
@@ -823,9 +856,9 @@ private fun InterfaceSection(usbInterface: UsbInterfaceSnapshot) {
 private fun LogCard(logs: List<String>) {
     InfoCard {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("실시간 로그", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Text("로그", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             if (logs.isEmpty()) {
-                Text("아직 로그가 없습니다.")
+                Text("대기")
             } else {
                 logs.take(12).forEach { log ->
                     Text(log, style = MaterialTheme.typography.bodySmall)
@@ -957,6 +990,9 @@ private data class PortDashboardState(
     val lastRs485: String? = null,
     val input0: String? = null,
     val input1: String? = null,
+    val relay0: String? = null,
+    val relay1: String? = null,
+    val lastRelayHex: String? = null,
     val lastRawHex: String? = null
 )
 
@@ -1114,16 +1150,17 @@ private fun UsbDiagnosticPreview() {
             devices = listOf(previewDevice),
             serialState = SerialUiState(connected = true, baudRate = 9600, status = "연결됨: 9600bps"),
             portState = PortDashboardState(
-                lastWiegand = "12345678 (26bit)",
+                lastWiegand = "32bit / Decimal 131654 / Data 00 02 02 46",
                 input0 = "Released",
                 input1 = "Pressed",
-                lastRawHex = "02 0C 09 31 32 33 34 35 36 37 38 03"
+                lastRawHex = "00 02 02 46"
             ),
             logs = listOf("[12:00:00] 미리보기 로그"),
             onRefresh = {},
             onRequestPermission = {},
             onConnectSerial = {},
             onDisconnectSerial = {},
+            onWiegandQuery = {},
             onRelayCommand = { _, _, _ -> }
         )
     }

@@ -22,6 +22,14 @@ class AccessLinkProtocolTest {
     }
 
     @Test
+    fun getWiegandInputDataPacketMatchesProtocol() {
+        assertArrayEquals(
+            byteArrayOf(0x02, 0x04, 0x09, 0x03),
+            AccessLinkProtocol.getWiegandInputData()
+        )
+    }
+
+    @Test
     fun wiegand26AsciiHexPayloadDecodesCardFields() {
         val decoded = AccessLinkProtocol.decodeWiegandInput("00020246".encodeToByteArray())
 

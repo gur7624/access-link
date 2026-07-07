@@ -39,6 +39,10 @@ object AccessLinkProtocol {
         return packet(CMD_SET_WIEGAND_OUT, byteArrayOf(useParity.asciiDigit()) + wiegandData)
     }
 
+    fun getWiegandInputData(): ByteArray {
+        return packet(CMD_GET_WIEGAND_INPUT_DATA)
+    }
+
     fun packet(command: Int, data: ByteArray = byteArrayOf()): ByteArray {
         require(command in 0..255) { "command must be 0..255" }
         val length = 4 + data.size
