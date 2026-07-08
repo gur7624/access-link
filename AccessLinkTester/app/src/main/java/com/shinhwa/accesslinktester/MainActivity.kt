@@ -836,7 +836,7 @@ private fun FieldPortDashboard(
             PortStatusRow(
                 title = "Relay",
                 description = "",
-                value = "R0 ${portState.relay0 ?: "-"} / R1 ${portState.relay1 ?: "-"}",
+                value = "1 ${portState.relay0 ?: "-"} / 2 ${portState.relay1 ?: "-"}",
                 status = if (serialState.connected) "테스트 가능" else "Serial 필요",
                 color = if (serialState.connected) ActiveBlue else WaitGray
             )
@@ -940,12 +940,12 @@ private fun SerialControlCard(
 
                 Text("Relay", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
                 RelayButtonRow(
-                    title = "Relay 0",
+                    title = "Relay 1",
                     onOn = { onRelayCommand(1, 1, 0) },
                     onOff = { onRelayCommand(1, 0, 0) }
                 )
                 RelayButtonRow(
-                    title = "Relay 1",
+                    title = "Relay 2",
                     onOn = { onRelayCommand(2, 1, 0) },
                     onOff = { onRelayCommand(2, 0, 0) }
                 )
