@@ -1,8 +1,10 @@
 package com.shinhwa.accesslinktester
 
 object AccessLinkProtocol {
-    private const val STX: Byte = 0x02
-    private const val ETX: Byte = 0x03
+    const val STX_VALUE: Int = 0x02
+    const val ETX_VALUE: Int = 0x03
+    private const val STX: Byte = STX_VALUE.toByte()
+    private const val ETX: Byte = ETX_VALUE.toByte()
 
     const val CMD_SET_RELAY_CONTROL: Int = 0x00
     const val CMD_SET_SERIAL_SEND: Int = 0x01
@@ -49,6 +51,26 @@ object AccessLinkProtocol {
         require(length <= 255) { "packet length must be <= 255" }
 
         return byteArrayOf(STX, length.toByte(), command.toByte()) + data + ETX
+    }
+
+    fun decodePacket(rawPacket: ByteArray): ShalPacket {
+        require(rawPacket.size >= MIN_PACKET_LENGTH) { "packet length must be >= $MIN_PACKET_LENGTH" }
+        require(rawPacket.first() == STX) { "invalid STX" }
+
+        val length = rawPacket[1].toInt() and 0xFF
+        require(length == rawPacket.size) { "invalid length: expected $length, actual ${rawPacket.size}" }
+        require(rawPacket.last() == ETX) { "invalid ETX" }
+
+        return ShalPacket(
+            length = length,
+            command = rawPacket[2].toInt() and 0xFF,
+            data = rawPacket.copyOfRange(3, rawPacket.size - 1),
+            raw = rawPacket.copyOf()
+        )
+    }
+
+    fun routePacket(rawPacket: ByteArray): DeviceEvent {
+        return AccessLinkCommandRouter.route(decodePacket(rawPacket))
     }
 
     fun describeIncoming(packet: ByteArray): String {
@@ -128,6 +150,207 @@ object AccessLinkProtocol {
 
     private fun Int.asciiDigit(): Byte {
         return ('0'.code + this).toByte()
+    }
+
+    internal const val MIN_PACKET_LENGTH: Int = 4
+}
+
+data class ShalPacket(
+    val length: Int,
+    val command: Int,
+    val data: ByteArray,
+    val raw: ByteArray
+)
+
+sealed interface ProtocolDecodeResult {
+    data class Packet(val packet: ShalPacket) : ProtocolDecodeResult
+    data class Error(val error: ProtocolError) : ProtocolDecodeResult
+}
+
+sealed interface ProtocolError {
+    val detail: String
+
+    data class GarbageBeforeStx(val garbage: ByteArray) : ProtocolError {
+        override val detail: String = "Garbage before STX: ${garbage.toHexString()}"
+    }
+
+    data class InvalidLength(val length: Int) : ProtocolError {
+        override val detail: String = "Invalid packet length: $length"
+    }
+
+    data class InvalidEtx(val raw: ByteArray) : ProtocolError {
+        override val detail: String = "Invalid ETX: ${raw.toHexString()}"
+    }
+
+    data class UnknownCommand(val command: Int, val packet: ShalPacket) : ProtocolError {
+        override val detail: String = "Unknown command: 0x${command.toString(16).uppercase().padStart(2, '0')}"
+    }
+}
+
+class ShalPacketDecoder {
+    private val buffer = mutableListOf<Byte>()
+
+    fun accept(bytes: ByteArray): List<ProtocolDecodeResult> {
+        if (bytes.isEmpty()) return emptyList()
+
+        buffer.addAll(bytes.toList())
+        val results = mutableListOf<ProtocolDecodeResult>()
+
+        while (buffer.isNotEmpty()) {
+            val stxIndex = buffer.indexOf(AccessLinkProtocol.STX_VALUE.toByte())
+            if (stxIndex < 0) {
+                val garbage = buffer.toByteArray()
+                buffer.clear()
+                results += ProtocolDecodeResult.Error(ProtocolError.GarbageBeforeStx(garbage))
+                break
+            }
+
+            if (stxIndex > 0) {
+                val garbage = buffer.take(stxIndex).toByteArray()
+                repeat(stxIndex) { buffer.removeAt(0) }
+                results += ProtocolDecodeResult.Error(ProtocolError.GarbageBeforeStx(garbage))
+            }
+
+            if (buffer.size < 2) break
+
+            val length = buffer[1].toInt() and 0xFF
+            if (length < AccessLinkProtocol.MIN_PACKET_LENGTH) {
+                results += ProtocolDecodeResult.Error(ProtocolError.InvalidLength(length))
+                buffer.removeAt(0)
+                continue
+            }
+
+            if (buffer.size < length) break
+
+            val candidate = buffer.take(length).toByteArray()
+            if (candidate.last() != AccessLinkProtocol.ETX_VALUE.toByte()) {
+                results += ProtocolDecodeResult.Error(ProtocolError.InvalidEtx(candidate))
+                buffer.removeAt(0)
+                continue
+            }
+
+            val packet = AccessLinkProtocol.decodePacket(candidate)
+            repeat(length) { buffer.removeAt(0) }
+            results += ProtocolDecodeResult.Packet(packet)
+        }
+
+        return results
+    }
+
+    fun reset() {
+        buffer.clear()
+    }
+}
+
+object AccessLinkCommandRouter {
+    fun route(packet: ShalPacket): DeviceEvent {
+        return when (packet.command) {
+            AccessLinkProtocol.CMD_SET_RELAY_CONTROL -> DeviceEvent.RelayCommandResult(
+                rawPacket = packet.raw,
+                payload = packet.data
+            )
+
+            AccessLinkProtocol.CMD_SET_SERIAL_SEND -> DeviceEvent.SerialSendResult(
+                rawPacket = packet.raw,
+                payload = packet.data
+            )
+
+            AccessLinkProtocol.CMD_SET_WIEGAND_OUT -> DeviceEvent.WiegandOutputResult(
+                rawPacket = packet.raw,
+                payload = packet.data
+            )
+
+            AccessLinkProtocol.CMD_GET_WIEGAND_INPUT_DATA -> DeviceEvent.WiegandReceived(
+                input = AccessLinkProtocol.decodeWiegandInput(packet.data),
+                rawPacket = packet.raw
+            )
+
+            AccessLinkProtocol.CMD_GET_RECV_DATA_RS232 -> DeviceEvent.SerialReceived(
+                port = SerialPort.RS232,
+                payload = packet.data,
+                rawPacket = packet.raw
+            )
+
+            AccessLinkProtocol.CMD_GET_RECV_DATA_RS485 -> DeviceEvent.SerialReceived(
+                port = SerialPort.RS485,
+                payload = packet.data,
+                rawPacket = packet.raw
+            )
+
+            AccessLinkProtocol.CMD_GET_INPUT_PORT_0 -> DeviceEvent.DigitalInputChanged(
+                port = 0,
+                status = packet.data.toDigitalInputStatus(),
+                rawPacket = packet.raw
+            )
+
+            AccessLinkProtocol.CMD_GET_INPUT_PORT_1 -> DeviceEvent.DigitalInputChanged(
+                port = 1,
+                status = packet.data.toDigitalInputStatus(),
+                rawPacket = packet.raw
+            )
+
+            else -> DeviceEvent.ProtocolErrorEvent(
+                ProtocolError.UnknownCommand(packet.command, packet)
+            )
+        }
+    }
+}
+
+sealed interface DeviceEvent {
+    data class SerialReceived(
+        val port: SerialPort,
+        val payload: ByteArray,
+        val rawPacket: ByteArray
+    ) : DeviceEvent
+
+    data class SerialSendResult(
+        val rawPacket: ByteArray,
+        val payload: ByteArray
+    ) : DeviceEvent
+
+    data class WiegandReceived(
+        val input: WiegandInput,
+        val rawPacket: ByteArray
+    ) : DeviceEvent
+
+    data class WiegandOutputResult(
+        val rawPacket: ByteArray,
+        val payload: ByteArray
+    ) : DeviceEvent
+
+    data class DigitalInputChanged(
+        val port: Int,
+        val status: DigitalInputStatus,
+        val rawPacket: ByteArray
+    ) : DeviceEvent
+
+    data class RelayCommandResult(
+        val rawPacket: ByteArray,
+        val payload: ByteArray
+    ) : DeviceEvent
+
+    data class ProtocolErrorEvent(
+        val error: ProtocolError
+    ) : DeviceEvent
+}
+
+enum class SerialPort {
+    RS232,
+    RS485
+}
+
+enum class DigitalInputStatus {
+    RELEASED,
+    PRESSED,
+    UNKNOWN
+}
+
+private fun ByteArray.toDigitalInputStatus(): DigitalInputStatus {
+    val value = firstOrNull()?.toInt()?.and(0xFF) ?: return DigitalInputStatus.UNKNOWN
+    return when (value) {
+        0x00, '0'.code -> DigitalInputStatus.RELEASED
+        0x01, '1'.code -> DigitalInputStatus.PRESSED
+        else -> DigitalInputStatus.UNKNOWN
     }
 }
 

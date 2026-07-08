@@ -60,6 +60,7 @@ private const val ACCESS_LINK_SERIAL_VENDOR_ID = 0x1A86
 private const val ACCESS_LINK_SERIAL_PRODUCT_ID = 0x7523
 private const val ACCESS_LINK_LAN_VENDOR_ID = 0x0BDA
 private const val ACCESS_LINK_LAN_PRODUCT_ID = 0x8152
+private const val DEFAULT_SERIAL_BAUD_RATE = 9600
 private const val RAW_32_CARD_BYTES = 4
 private const val RAW_32_BUFFER_TIMEOUT_MS = 300L
 private const val RAW_32_STABLE_WINDOW_MS = 2_000L
@@ -198,6 +199,12 @@ class MainActivity : ComponentActivity() {
         } else {
             appendLog("감지된 USB 장치 ${snapshots.size}개")
         }
+
+        val serialDevice = snapshots.firstOrNull { it.isAccessLinkSerial }
+        when {
+            serialDevice?.hasPermission == true && !serialState.value.connected -> connectSerial(DEFAULT_SERIAL_BAUD_RATE)
+            serialDevice == null && serialState.value.connected -> disconnectSerial()
+        }
     }
 
     private fun registerEthernetCallback() {
@@ -266,6 +273,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun connectSerial(baudRate: Int) {
+        if (serialState.value.connected && serialState.value.baudRate == baudRate) {
+            return
+        }
+
         val device = usbManager.deviceList.values.firstOrNull { it.isAccessLinkSerialDevice() }
         if (device == null) {
             appendLog("제어 장치 없음")
@@ -529,6 +540,9 @@ private fun UsbDiagnosticApp(
                         ethernetState = ethernetState,
                         portState = portState,
                         logs = logs,
+                        onConnectSerial = onConnectSerial,
+                        onDisconnectSerial = onDisconnectSerial,
+                        onWiegandQuery = onWiegandQuery,
                         onRequestPermission = onRequestPermission
                     )
                 }
@@ -546,10 +560,7 @@ private fun UsbDiagnosticApp(
                     SerialControlCard(
                         serialDevice = devices.firstOrNull { it.isAccessLinkSerial },
                         serialState = serialState,
-                        onConnectSerial = onConnectSerial,
-                        onDisconnectSerial = onDisconnectSerial,
                         onRequestPermission = onRequestPermission,
-                        onWiegandQuery = onWiegandQuery,
                         onRelayCommand = onRelayCommand
                     )
                 }
@@ -650,6 +661,9 @@ private fun AdminDiagnosticsScreen(
     ethernetState: EthernetUiState,
     portState: PortDashboardState,
     logs: List<String>,
+    onConnectSerial: (Int) -> Unit,
+    onDisconnectSerial: () -> Unit,
+    onWiegandQuery: () -> Unit,
     onRequestPermission: (UsbDeviceSnapshot) -> Unit
 ) {
     val serialDevice = devices.firstOrNull { it.isAccessLinkSerial }
@@ -671,6 +685,13 @@ private fun AdminDiagnosticsScreen(
                 }
             }
         }
+
+        AdminSerialControlCard(
+            serialState = serialState,
+            onConnectSerial = onConnectSerial,
+            onDisconnectSerial = onDisconnectSerial,
+            onWiegandQuery = onWiegandQuery
+        )
 
         InfoCard {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -725,6 +746,55 @@ private fun DiagnosticFindingRow(finding: DiagnosticFinding) {
             Text(finding.area, style = MaterialTheme.typography.bodySmall)
             Text(finding.evidence, style = MaterialTheme.typography.bodySmall, color = Color(0xFF5B6472))
             Text(finding.nextStep, style = MaterialTheme.typography.bodySmall, color = Color(0xFF5B6472))
+        }
+    }
+}
+
+@Composable
+private fun AdminSerialControlCard(
+    serialState: SerialUiState,
+    onConnectSerial: (Int) -> Unit,
+    onDisconnectSerial: () -> Unit,
+    onWiegandQuery: () -> Unit
+) {
+    InfoCard {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("제어", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                StatusChip(
+                    text = if (serialState.connected) "연결" else "미연결",
+                    color = if (serialState.connected) PassGreen else WaitGray
+                )
+            }
+
+            DetailGrid(
+                items = listOf(
+                    "Baudrate" to serialState.baudRate.toString(),
+                    "상태" to serialState.status
+                )
+            )
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                Button(onClick = { onConnectSerial(9600) }, modifier = Modifier.weight(1f)) {
+                    Text("9600")
+                }
+                Button(onClick = { onConnectSerial(115200) }, modifier = Modifier.weight(1f)) {
+                    Text("115200")
+                }
+            }
+
+            if (serialState.connected) {
+                Button(onClick = onDisconnectSerial, modifier = Modifier.fillMaxWidth()) {
+                    Text("연결 해제")
+                }
+                Button(onClick = onWiegandQuery, modifier = Modifier.fillMaxWidth()) {
+                    Text("Wiegand 조회")
+                }
+            }
         }
     }
 }
@@ -878,10 +948,7 @@ private fun PortStatusRow(
 private fun SerialControlCard(
     serialDevice: UsbDeviceSnapshot?,
     serialState: SerialUiState,
-    onConnectSerial: (Int) -> Unit,
-    onDisconnectSerial: () -> Unit,
     onRequestPermission: (UsbDeviceSnapshot) -> Unit,
-    onWiegandQuery: () -> Unit,
     onRelayCommand: (Int, Int, Int) -> Unit
 ) {
     InfoCard {
@@ -913,36 +980,22 @@ private fun SerialControlCard(
                 return@InfoCard
             }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                Button(onClick = { onConnectSerial(9600) }, modifier = Modifier.weight(1f)) {
-                    Text("9600")
-                }
-                Button(onClick = { onConnectSerial(115200) }, modifier = Modifier.weight(1f)) {
-                    Text("115200")
-                }
+            if (!serialState.connected) {
+                Text("자동 연결 중")
+                return@InfoCard
             }
 
-            if (serialState.connected) {
-                Button(onClick = onDisconnectSerial, modifier = Modifier.fillMaxWidth()) {
-                    Text("연결 해제")
-                }
-
-                Button(onClick = onWiegandQuery, modifier = Modifier.fillMaxWidth()) {
-                    Text("Wiegand 조회")
-                }
-
-                Text("Relay Output", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
-                RelayButtonRow(
-                    title = "Relay 1",
-                    onOn = { onRelayCommand(1, 1, 0) },
-                    onOff = { onRelayCommand(1, 0, 0) }
-                )
-                RelayButtonRow(
-                    title = "Relay 2",
-                    onOn = { onRelayCommand(2, 1, 0) },
-                    onOff = { onRelayCommand(2, 0, 0) }
-                )
-            }
+            Text("Relay Output", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+            RelayButtonRow(
+                title = "Relay 1",
+                onOn = { onRelayCommand(1, 1, 0) },
+                onOff = { onRelayCommand(1, 0, 0) }
+            )
+            RelayButtonRow(
+                title = "Relay 2",
+                onOn = { onRelayCommand(2, 1, 0) },
+                onOff = { onRelayCommand(2, 0, 0) }
+            )
         }
     }
 }
