@@ -12,11 +12,13 @@ class AccessLinkSerialController(
     private val device: UsbDevice,
     private val baudRate: Int,
     private val onLog: (String) -> Unit,
-    private val onReceive: (ByteArray) -> Unit
+    private val onReceive: (ByteArray) -> Unit,
+    private val onDisconnected: (String?) -> Unit = {}
 ) {
     private var port: UsbSerialPort? = null
     private var readerThread: Thread? = null
     private val running = AtomicBoolean(false)
+    private val writeLock = Any()
 
     fun open() {
         val driver = UsbSerialProber.getDefaultProber().probeDevice(device)
@@ -40,8 +42,10 @@ class AccessLinkSerialController(
     }
 
     fun write(data: ByteArray) {
-        val serialPort = port ?: error("Serial 포트가 열려 있지 않습니다.")
-        serialPort.write(data, WRITE_TIMEOUT_MS)
+        synchronized(writeLock) {
+            val serialPort = port ?: error("Serial 포트가 열려 있지 않습니다.")
+            serialPort.write(data, WRITE_TIMEOUT_MS)
+        }
     }
 
     fun close() {
@@ -68,6 +72,7 @@ class AccessLinkSerialController(
                 } catch (exception: IOException) {
                     if (running.get()) {
                         onLog("Serial 수신 오류: ${exception.message ?: "알 수 없는 오류"}")
+                        onDisconnected(exception.message)
                     }
                     running.set(false)
                 }

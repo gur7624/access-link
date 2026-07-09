@@ -37,13 +37,18 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -70,11 +75,14 @@ class MainActivity : ComponentActivity() {
     private lateinit var connectivityManager: ConnectivityManager
     private val usbDevices = mutableStateListOf<UsbDeviceSnapshot>()
     private val logs = mutableStateListOf<String>()
+    private val rs232Logs = mutableStateListOf<SerialPortLog>()
+    private val rs485Logs = mutableStateListOf<SerialPortLog>()
+    private val wiegandTxLogs = mutableStateListOf<WiegandOutputLog>()
     private val serialState = mutableStateOf(SerialUiState())
     private val ethernetState = mutableStateOf(EthernetUiState())
     private val portState = mutableStateOf(PortDashboardState())
     private val adminMode = mutableStateOf(false)
-    private var serialController: AccessLinkSerialController? = null
+    private lateinit var connectionManager: AccessLinkConnectionManager
     private val raw32Buffer = ArrayDeque<Byte>()
     private var raw32BufferUpdatedAt = 0L
     private var lastRaw32CandidateHex: String? = null
@@ -104,6 +112,7 @@ class MainActivity : ComponentActivity() {
 
                 UsbManager.ACTION_USB_DEVICE_DETACHED -> {
                     appendLog("USB 장치 분리 감지")
+                    connectionManager.handleUsbDeviceDetached(intent.usbDevice()?.deviceName)
                     refreshUsbDevices()
                 }
             }
@@ -132,6 +141,24 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         usbManager = getSystemService(UsbManager::class.java)
         connectivityManager = getSystemService(ConnectivityManager::class.java)
+        connectionManager = AccessLinkConnectionManager(
+            usbManager = usbManager,
+            onStatusChanged = { status ->
+                runOnUiThread {
+                    serialState.value = status.toSerialUiState()
+                }
+            },
+            onEvent = { event ->
+                runOnUiThread {
+                    handleConnectionEvent(event)
+                }
+            },
+            onLog = { message ->
+                runOnUiThread {
+                    appendLog(message)
+                }
+            }
+        )
         registerUsbReceiver()
         registerEthernetCallback()
         refreshUsbDevices()
@@ -145,6 +172,9 @@ class MainActivity : ComponentActivity() {
                     serialState = serialState.value,
                     ethernetState = ethernetState.value,
                     portState = portState.value,
+                    rs232Logs = rs232Logs,
+                    rs485Logs = rs485Logs,
+                    wiegandTxLogs = wiegandTxLogs,
                     logs = logs,
                     adminMode = adminMode.value,
                     onRefresh = {
@@ -157,6 +187,10 @@ class MainActivity : ComponentActivity() {
                     onConnectSerial = ::connectSerial,
                     onDisconnectSerial = ::disconnectSerial,
                     onWiegandQuery = ::sendWiegandQuery,
+                    onWiegandOutput = ::sendWiegandOutput,
+                    onWiegandClear = ::clearWiegandState,
+                    onSerialSend = ::sendSerialPayload,
+                    onSerialClear = ::clearSerialPortLogs,
                     onRelayCommand = ::sendRelayCommand
                 )
             }
@@ -202,8 +236,13 @@ class MainActivity : ComponentActivity() {
 
         val serialDevice = snapshots.firstOrNull { it.isAccessLinkSerial }
         when {
-            serialDevice?.hasPermission == true && !serialState.value.connected -> connectSerial(DEFAULT_SERIAL_BAUD_RATE)
-            serialDevice == null && serialState.value.connected -> disconnectSerial()
+            serialDevice?.hasPermission == true && !connectionManager.status.connected -> {
+                connectSerial(DEFAULT_SERIAL_BAUD_RATE)
+            }
+
+            serialDevice == null && connectionManager.status.connected -> {
+                connectionManager.handleUsbDeviceDetached(null)
+            }
         }
     }
 
@@ -273,69 +312,35 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun connectSerial(baudRate: Int) {
-        if (serialState.value.connected && serialState.value.baudRate == baudRate) {
+        if (connectionManager.status.connected && connectionManager.status.baudRate == baudRate) {
             return
         }
 
         val device = usbManager.deviceList.values.firstOrNull { it.isAccessLinkSerialDevice() }
         if (device == null) {
             appendLog("제어 장치 없음")
-            serialState.value = serialState.value.copy(status = "장치 없음")
+            serialState.value = serialState.value.copy(connected = false, status = "장치 없음")
             return
         }
 
         if (!usbManager.hasPermission(device)) {
             appendLog("권한 필요")
             requestUsbPermission(device.toSnapshot(false))
-            serialState.value = serialState.value.copy(status = "권한 필요")
+            serialState.value = serialState.value.copy(connected = false, status = "권한 필요")
             return
         }
 
-        disconnectSerial()
-        try {
-            val controller = AccessLinkSerialController(
-                usbManager = usbManager,
-                device = device,
-                baudRate = baudRate,
-                onLog = { message -> runOnUiThread { appendLog(message) } },
-                onReceive = { data ->
-                    runOnUiThread {
-                        appendLog(handleSerialReceive(data))
-                    }
-                }
-            )
-            controller.open()
-            serialController = controller
-            serialState.value = SerialUiState(
-                connected = true,
-                baudRate = baudRate,
-                status = "연결됨: ${baudRate}bps"
-            )
-        } catch (exception: Exception) {
-            serialController = null
-            serialState.value = SerialUiState(
-                connected = false,
-                baudRate = baudRate,
-                status = "연결 실패: ${exception.message ?: "알 수 없는 오류"}"
-            )
-            appendLog(serialState.value.status)
-        }
+        connectionManager.connect(device, baudRate)
     }
 
     private fun disconnectSerial() {
-        serialController?.close()
-        serialController = null
-        if (serialState.value.connected) {
-            appendLog("연결 해제")
-        }
-        serialState.value = serialState.value.copy(connected = false, status = "연결 안 됨")
+        connectionManager.disconnect()
     }
 
     private fun sendRelayCommand(useRelay: Int, outputType: Int, time: Int) {
         val packet = AccessLinkProtocol.relayControl(useRelay, outputType, time)
         try {
-            val controller = serialController ?: error("연결 필요")
-            controller.write(packet)
+            connectionManager.send(packet)
             val relayState = if (outputType == 1) "ON 송신" else "OFF 송신"
             portState.value = portState.value.copy(
                 relay0 = if (useRelay == 0 || useRelay == 1) relayState else portState.value.relay0,
@@ -351,8 +356,7 @@ class MainActivity : ComponentActivity() {
     private fun sendWiegandQuery() {
         val packet = AccessLinkProtocol.getWiegandInputData()
         try {
-            val controller = serialController ?: error("연결 필요")
-            controller.write(packet)
+            connectionManager.send(packet)
             raw32Buffer.clear()
             appendLog("Wiegand 조회 ${packet.toHexString()}")
         } catch (exception: Exception) {
@@ -360,14 +364,128 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun handleSerialReceive(data: ByteArray): String {
-        val rawHex = data.toHexString()
-        if (data.isAccessLinkPacket()) {
-            raw32Buffer.clear()
-            updatePortState(data)
-            return "수신 $rawHex / ${AccessLinkProtocol.describeIncoming(data)}"
+    private fun sendWiegandOutput(useParity: Boolean, input: String): String {
+        val parseResult = WiegandPayloadCodec.parseOutputHex(input)
+        if (parseResult is WiegandPayloadParseResult.Error) {
+            val message = "Wiegand OUT 실패: ${parseResult.message}"
+            appendLog(message)
+            return message
         }
 
+        val payload = (parseResult as WiegandPayloadParseResult.Success).bytes
+        val useParityValue = if (useParity) 0 else 1
+        val packet = AccessLinkProtocol.wiegandOut(useParityValue, payload)
+
+        return try {
+            connectionManager.send(packet)
+            val entry = WiegandOutputLog(
+                parity = if (useParity) "Parity 출력" else "Parity 미출력",
+                dataHex = payload.toHexString(),
+                packetHex = packet.toHexString()
+            )
+            wiegandTxLogs.add(0, entry)
+            if (wiegandTxLogs.size > 20) {
+                wiegandTxLogs.removeRange(20, wiegandTxLogs.size)
+            }
+            portState.value = portState.value.copy(lastWiegandOutputHex = packet.toHexString())
+            val message = "Wiegand OUT TX ${payload.size} bytes"
+            appendLog("$message / Packet ${packet.toHexString()}")
+            message
+        } catch (exception: Exception) {
+            val message = "Wiegand OUT 실패: ${exception.message ?: "알 수 없는 오류"}"
+            appendLog(message)
+            message
+        }
+    }
+
+    private fun clearWiegandState() {
+        raw32Buffer.clear()
+        lastRaw32CandidateHex = null
+        lastRaw32CandidateAt = 0L
+        lastRaw32CandidateCount = 0
+        wiegandTxLogs.clear()
+        portState.value = portState.value.copy(
+            lastWiegand = null,
+            rawWiegandStatus = null,
+            lastCardHex = null,
+            lastWiegandRawHex = null,
+            lastWiegandReceivedAt = null,
+            wiegandReceiveCount = 0,
+            lastWiegandOutputHex = null
+        )
+        appendLog("Wiegand 초기화")
+    }
+
+    private fun sendSerialPayload(port: SerialPort, mode: SerialInputMode, input: String): String {
+        val parseResult = SerialPayloadCodec.parse(input, mode)
+        if (parseResult is SerialPayloadParseResult.Error) {
+            val message = "${port.label} TX 실패: ${parseResult.message}"
+            appendLog(message)
+            return message
+        }
+
+        val payload = (parseResult as SerialPayloadParseResult.Success).bytes
+        val useSerialPort = when (port) {
+            SerialPort.RS232 -> 0
+            SerialPort.RS485 -> 1
+        }
+        val packet = AccessLinkProtocol.serialSend(useSerialPort, payload)
+
+        return try {
+            connectionManager.send(packet)
+            addSerialPortLog(
+                port = port,
+                entry = SerialPortLog(
+                    direction = "TX",
+                    hex = payload.toHexString(),
+                    ascii = SerialPayloadCodec.safeAscii(payload),
+                    packetHex = packet.toHexString()
+                )
+            )
+            val message = "${port.label} TX ${payload.size} bytes"
+            appendLog("$message / Packet ${packet.toHexString()}")
+            message
+        } catch (exception: Exception) {
+            val message = "${port.label} TX 실패: ${exception.message ?: "알 수 없는 오류"}"
+            appendLog(message)
+            message
+        }
+    }
+
+    private fun clearSerialPortLogs(port: SerialPort) {
+        when (port) {
+            SerialPort.RS232 -> rs232Logs.clear()
+            SerialPort.RS485 -> rs485Logs.clear()
+        }
+        appendLog("${port.label} 로그 초기화")
+    }
+
+    private fun handleConnectionEvent(event: AccessLinkConnectionEvent) {
+        when (event) {
+            is AccessLinkConnectionEvent.RawDataReceived -> {
+                if (!event.data.hasProtocolStart()) {
+                    appendLog(handleRawSerialReceive(event.data))
+                }
+            }
+
+            is AccessLinkConnectionEvent.PacketReceived -> {
+                raw32Buffer.clear()
+                updatePortState(event.packet.raw)
+                appendLog("수신 ${event.packet.raw.toHexString()} / ${AccessLinkProtocol.describeIncoming(event.packet.raw)}")
+            }
+
+            is AccessLinkConnectionEvent.ProtocolErrorReceived -> {
+                appendLog("프로토콜 오류: ${event.error.toDisplayMessage()}")
+            }
+
+            is AccessLinkConnectionEvent.PacketSent -> {
+                // 송신 로그는 기능별 버튼 처리에서 기록한다.
+            }
+        }
+    }
+
+    private fun handleRawSerialReceive(data: ByteArray): String {
+        val rawHex = data.toHexString()
         val raw32 = updateRaw32Candidate(data)
         if (raw32 != null) {
             val stableRaw32 = markRaw32Candidate(raw32.dataHex)
@@ -376,6 +494,9 @@ class MainActivity : ComponentActivity() {
                     lastWiegand = raw32.summary,
                     rawWiegandStatus = null,
                     lastCardHex = raw32.dataHex,
+                    lastWiegandRawHex = rawHex,
+                    lastWiegandReceivedAt = currentLogTime(),
+                    wiegandReceiveCount = portState.value.wiegandReceiveCount + 1,
                     lastRawHex = rawHex
                 )
             } else {
@@ -454,15 +575,36 @@ class MainActivity : ComponentActivity() {
                     lastWiegand = decoded.summary,
                     rawWiegandStatus = null,
                     lastCardHex = decoded.dataHex,
+                    lastWiegandRawHex = rawHex,
+                    lastWiegandReceivedAt = currentLogTime(),
+                    wiegandReceiveCount = portState.value.wiegandReceiveCount + 1,
                     lastRawHex = rawHex
                 )
             }
 
             AccessLinkProtocol.CMD_GET_RECV_DATA_RS232 -> {
+                addSerialPortLog(
+                    port = SerialPort.RS232,
+                    entry = SerialPortLog(
+                        direction = "RX",
+                        hex = payload.toHexString(),
+                        ascii = SerialPayloadCodec.safeAscii(payload),
+                        packetHex = rawHex
+                    )
+                )
                 portState.value.copy(lastRs232 = payload.toHexString(), lastRawHex = rawHex)
             }
 
             AccessLinkProtocol.CMD_GET_RECV_DATA_RS485 -> {
+                addSerialPortLog(
+                    port = SerialPort.RS485,
+                    entry = SerialPortLog(
+                        direction = "RX",
+                        hex = payload.toHexString(),
+                        ascii = SerialPayloadCodec.safeAscii(payload),
+                        packetHex = rawHex
+                    )
+                )
                 portState.value.copy(lastRs485 = payload.toHexString(), lastRawHex = rawHex)
             }
 
@@ -482,8 +624,19 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun addSerialPortLog(port: SerialPort, entry: SerialPortLog) {
+        val target = when (port) {
+            SerialPort.RS232 -> rs232Logs
+            SerialPort.RS485 -> rs485Logs
+        }
+        target.add(0, entry)
+        if (target.size > 40) {
+            target.removeRange(40, target.size)
+        }
+    }
+
     private fun appendLog(message: String) {
-        val time = SimpleDateFormat("HH:mm:ss", Locale.KOREA).format(Date())
+        val time = currentLogTime()
         logs.add(0, "[$time] $message")
         if (logs.size > 80) {
             logs.removeRange(80, logs.size)
@@ -491,9 +644,45 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+private fun currentLogTime(): String {
+    return SimpleDateFormat("HH:mm:ss", Locale.KOREA).format(Date())
+}
+
 private fun ByteArray.isAccessLinkPacket(): Boolean {
     return size >= 4 && first() == 0x02.toByte() && last() == 0x03.toByte()
 }
+
+private fun ByteArray.hasProtocolStart(): Boolean {
+    return any { it == 0x02.toByte() }
+}
+
+private fun AccessLinkConnectionStatus.toSerialUiState(): SerialUiState {
+    return SerialUiState(
+        connected = connected,
+        baudRate = baudRate,
+        status = when (state) {
+            AccessLinkConnectionState.DISCONNECTED -> message
+            AccessLinkConnectionState.CONNECTING -> "연결 중"
+            AccessLinkConnectionState.CONNECTED -> "연결됨: ${baudRate}bps"
+            AccessLinkConnectionState.ERROR -> message
+        }
+    )
+}
+
+private fun ProtocolError.toDisplayMessage(): String {
+    return when (this) {
+        is ProtocolError.GarbageBeforeStx -> "패킷 시작 전 데이터 ${garbage.toHexString()}"
+        is ProtocolError.InvalidLength -> "잘못된 길이 $length"
+        is ProtocolError.InvalidEtx -> "ETX 오류 ${raw.toHexString()}"
+        is ProtocolError.UnknownCommand -> "알 수 없는 명령 0x${command.toString(16).uppercase()}"
+    }
+}
+
+private val SerialPort.label: String
+    get() = when (this) {
+        SerialPort.RS232 -> "RS-232"
+        SerialPort.RS485 -> "RS-485"
+    }
 
 @Composable
 private fun UsbDiagnosticApp(
@@ -501,6 +690,9 @@ private fun UsbDiagnosticApp(
     serialState: SerialUiState,
     ethernetState: EthernetUiState,
     portState: PortDashboardState,
+    rs232Logs: List<SerialPortLog>,
+    rs485Logs: List<SerialPortLog>,
+    wiegandTxLogs: List<WiegandOutputLog>,
     logs: List<String>,
     adminMode: Boolean,
     onRefresh: () -> Unit,
@@ -509,6 +701,10 @@ private fun UsbDiagnosticApp(
     onConnectSerial: (Int) -> Unit,
     onDisconnectSerial: () -> Unit,
     onWiegandQuery: () -> Unit,
+    onWiegandOutput: (Boolean, String) -> String,
+    onWiegandClear: () -> Unit,
+    onSerialSend: (SerialPort, SerialInputMode, String) -> String,
+    onSerialClear: (SerialPort) -> Unit,
     onRelayCommand: (Int, Int, Int) -> Unit
 ) {
     Scaffold(
@@ -540,6 +736,13 @@ private fun UsbDiagnosticApp(
                         ethernetState = ethernetState,
                         portState = portState,
                         logs = logs,
+                        rs232Logs = rs232Logs,
+                        rs485Logs = rs485Logs,
+                        wiegandTxLogs = wiegandTxLogs,
+                        onWiegandOutput = onWiegandOutput,
+                        onWiegandClear = onWiegandClear,
+                        onSerialSend = onSerialSend,
+                        onSerialClear = onSerialClear,
                         onConnectSerial = onConnectSerial,
                         onDisconnectSerial = onDisconnectSerial,
                         onWiegandQuery = onWiegandQuery,
@@ -562,6 +765,27 @@ private fun UsbDiagnosticApp(
                         serialState = serialState,
                         onRequestPermission = onRequestPermission,
                         onRelayCommand = onRelayCommand
+                    )
+                }
+
+                item {
+                    WiegandTestCard(
+                        serialState = serialState,
+                        portState = portState,
+                        txLogs = wiegandTxLogs,
+                        onWiegandQuery = onWiegandQuery,
+                        onWiegandOutput = onWiegandOutput,
+                        onWiegandClear = onWiegandClear
+                    )
+                }
+
+                item {
+                    SerialTestCard(
+                        serialState = serialState,
+                        rs232Logs = rs232Logs,
+                        rs485Logs = rs485Logs,
+                        onSerialSend = onSerialSend,
+                        onSerialClear = onSerialClear
                     )
                 }
 
@@ -661,6 +885,13 @@ private fun AdminDiagnosticsScreen(
     ethernetState: EthernetUiState,
     portState: PortDashboardState,
     logs: List<String>,
+    rs232Logs: List<SerialPortLog>,
+    rs485Logs: List<SerialPortLog>,
+    wiegandTxLogs: List<WiegandOutputLog>,
+    onWiegandOutput: (Boolean, String) -> String,
+    onWiegandClear: () -> Unit,
+    onSerialSend: (SerialPort, SerialInputMode, String) -> String,
+    onSerialClear: (SerialPort) -> Unit,
     onConnectSerial: (Int) -> Unit,
     onDisconnectSerial: () -> Unit,
     onWiegandQuery: () -> Unit,
@@ -691,6 +922,23 @@ private fun AdminDiagnosticsScreen(
             onConnectSerial = onConnectSerial,
             onDisconnectSerial = onDisconnectSerial,
             onWiegandQuery = onWiegandQuery
+        )
+
+        WiegandTestCard(
+            serialState = serialState,
+            portState = portState,
+            txLogs = wiegandTxLogs,
+            onWiegandQuery = onWiegandQuery,
+            onWiegandOutput = onWiegandOutput,
+            onWiegandClear = onWiegandClear
+        )
+
+        SerialTestCard(
+            serialState = serialState,
+            rs232Logs = rs232Logs,
+            rs485Logs = rs485Logs,
+            onSerialSend = onSerialSend,
+            onSerialClear = onSerialClear
         )
 
         InfoCard {
@@ -805,6 +1053,129 @@ private fun EmptyDeviceCard() {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("장치 없음", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             Text("USB-C 연결")
+        }
+    }
+}
+
+@Composable
+private fun WiegandTestCard(
+    serialState: SerialUiState,
+    portState: PortDashboardState,
+    txLogs: List<WiegandOutputLog>,
+    onWiegandQuery: () -> Unit,
+    onWiegandOutput: (Boolean, String) -> String,
+    onWiegandClear: () -> Unit
+) {
+    var outputText by remember { mutableStateOf("") }
+    var useParity by remember { mutableStateOf(true) }
+    var statusText by remember { mutableStateOf("대기") }
+
+    InfoCard {
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Text("Wiegand", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    Text("Input / Output", style = MaterialTheme.typography.bodySmall, color = Color(0xFF5B6472))
+                }
+                StatusChip(
+                    text = if (serialState.connected) "사용 가능" else "연결 필요",
+                    color = if (serialState.connected) ActiveBlue else WaitGray
+                )
+            }
+
+            Surface(
+                color = Color(0xFFF8FAFC),
+                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Input", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                    DetailGrid(
+                        items = listOf(
+                            "Format" to portState.wiegandFormatText,
+                            "Received Data" to (portState.lastCardHex ?: "-"),
+                            "Raw Data" to (portState.lastWiegandRawHex ?: "-"),
+                            "수신 시간" to (portState.lastWiegandReceivedAt ?: "-"),
+                            "Count" to portState.wiegandReceiveCount.toString(),
+                            "마지막 수신" to (portState.lastWiegand ?: "-")
+                        )
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        Button(
+                            onClick = onWiegandQuery,
+                            modifier = Modifier.weight(1f),
+                            enabled = serialState.connected
+                        ) {
+                            Text("조회")
+                        }
+                        Button(
+                            onClick = onWiegandClear,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Clear")
+                        }
+                    }
+                }
+            }
+
+            Surface(
+                color = Color(0xFFF8FAFC),
+                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Output", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                        StatusChip(statusText, if (statusText.contains("실패")) FailRed else ActiveBlue)
+                    }
+
+                    OutlinedTextField(
+                        value = outputText,
+                        onValueChange = { outputText = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = serialState.connected,
+                        label = { Text("HEX 1~16 bytes") },
+                        singleLine = false,
+                        minLines = 2
+                    )
+
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Checkbox(checked = useParity, onCheckedChange = { useParity = it })
+                        Text(if (useParity) "Parity 출력" else "Parity 미출력")
+                    }
+
+                    Button(
+                        onClick = { statusText = onWiegandOutput(useParity, outputText) },
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = serialState.connected
+                    ) {
+                        Text("SEND")
+                    }
+
+                    if (txLogs.isEmpty()) {
+                        Text("TX 없음", style = MaterialTheme.typography.bodySmall, color = Color(0xFF5B6472))
+                    } else {
+                        txLogs.take(4).forEach { log ->
+                            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Text("TX ${log.dataHex}", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
+                                Text(log.parity, style = MaterialTheme.typography.bodySmall, color = Color(0xFF5B6472))
+                                Text("Packet ${log.packetHex}", style = MaterialTheme.typography.bodySmall, color = Color(0xFF5B6472))
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -997,6 +1368,165 @@ private fun SerialControlCard(
                 onOff = { onRelayCommand(2, 0, 0) }
             )
         }
+    }
+}
+
+@Composable
+private fun SerialTestCard(
+    serialState: SerialUiState,
+    rs232Logs: List<SerialPortLog>,
+    rs485Logs: List<SerialPortLog>,
+    onSerialSend: (SerialPort, SerialInputMode, String) -> String,
+    onSerialClear: (SerialPort) -> Unit
+) {
+    InfoCard {
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Text("Serial Test", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    Text("RS-232 / RS-485", style = MaterialTheme.typography.bodySmall, color = Color(0xFF5B6472))
+                }
+                StatusChip(
+                    text = if (serialState.connected) "송신 가능" else "연결 필요",
+                    color = if (serialState.connected) ActiveBlue else WaitGray
+                )
+            }
+
+            SerialPortPanel(
+                port = SerialPort.RS232,
+                enabled = serialState.connected,
+                entries = rs232Logs,
+                onSerialSend = onSerialSend,
+                onSerialClear = onSerialClear
+            )
+            SerialPortPanel(
+                port = SerialPort.RS485,
+                enabled = serialState.connected,
+                entries = rs485Logs,
+                onSerialSend = onSerialSend,
+                onSerialClear = onSerialClear
+            )
+        }
+    }
+}
+
+@Composable
+private fun SerialPortPanel(
+    port: SerialPort,
+    enabled: Boolean,
+    entries: List<SerialPortLog>,
+    onSerialSend: (SerialPort, SerialInputMode, String) -> String,
+    onSerialClear: (SerialPort) -> Unit
+) {
+    var inputMode by remember(port) { mutableStateOf(SerialInputMode.ASCII) }
+    var inputText by remember(port) { mutableStateOf("") }
+    var statusText by remember(port) { mutableStateOf("대기") }
+    var showLogs by remember(port) { mutableStateOf(true) }
+    var autoScroll by remember(port) { mutableStateOf(true) }
+
+    Surface(
+        color = Color(0xFFF8FAFC),
+        shape = RoundedCornerShape(8.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(port.label, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                StatusChip(statusText, if (statusText.contains("실패")) FailRed else ActiveBlue)
+            }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                Button(
+                    onClick = { inputMode = SerialInputMode.ASCII },
+                    modifier = Modifier.weight(1f),
+                    enabled = inputMode != SerialInputMode.ASCII
+                ) {
+                    Text("ASCII")
+                }
+                Button(
+                    onClick = { inputMode = SerialInputMode.HEX },
+                    modifier = Modifier.weight(1f),
+                    enabled = inputMode != SerialInputMode.HEX
+                ) {
+                    Text("HEX")
+                }
+            }
+
+            OutlinedTextField(
+                value = inputText,
+                onValueChange = { inputText = it },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = enabled,
+                label = { Text(if (inputMode == SerialInputMode.ASCII) "ASCII 입력" else "HEX 입력") },
+                singleLine = false,
+                minLines = 2
+            )
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                Button(
+                    onClick = { statusText = onSerialSend(port, inputMode, inputText) },
+                    modifier = Modifier.weight(1f),
+                    enabled = enabled
+                ) {
+                    Text("SEND")
+                }
+                Button(
+                    onClick = {
+                        inputText = ""
+                        statusText = "대기"
+                        onSerialClear(port)
+                    },
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("Clear")
+                }
+            }
+
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Checkbox(checked = showLogs, onCheckedChange = { showLogs = it })
+                Text("Log")
+                Checkbox(checked = autoScroll, onCheckedChange = { autoScroll = it })
+                Text("Auto Scroll")
+            }
+
+            if (showLogs) {
+                val visibleEntries = if (autoScroll) entries.take(6) else entries.takeLast(6)
+                if (visibleEntries.isEmpty()) {
+                    Text("TX/RX 없음", style = MaterialTheme.typography.bodySmall, color = Color(0xFF5B6472))
+                } else {
+                    visibleEntries.forEach { entry ->
+                        SerialPortLogRow(entry)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SerialPortLogRow(entry: SerialPortLog) {
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(
+            "${entry.direction} HEX ${entry.hex}",
+            style = MaterialTheme.typography.bodySmall,
+            fontWeight = FontWeight.Medium
+        )
+        Text("ASCII ${entry.ascii}", style = MaterialTheme.typography.bodySmall, color = Color(0xFF5B6472))
+        Text("Packet ${entry.packetHex}", style = MaterialTheme.typography.bodySmall, color = Color(0xFF5B6472))
     }
 }
 
@@ -1440,6 +1970,10 @@ private data class PortDashboardState(
     val lastWiegand: String? = null,
     val rawWiegandStatus: String? = null,
     val lastCardHex: String? = null,
+    val lastWiegandRawHex: String? = null,
+    val lastWiegandReceivedAt: String? = null,
+    val wiegandReceiveCount: Int = 0,
+    val lastWiegandOutputHex: String? = null,
     val lastRs232: String? = null,
     val lastRs485: String? = null,
     val input0: String? = null,
@@ -1449,6 +1983,29 @@ private data class PortDashboardState(
     val lastRelayHex: String? = null,
     val lastRawHex: String? = null
 )
+
+private data class SerialPortLog(
+    val direction: String,
+    val hex: String,
+    val ascii: String,
+    val packetHex: String
+)
+
+private data class WiegandOutputLog(
+    val parity: String,
+    val dataHex: String,
+    val packetHex: String
+)
+
+private val PortDashboardState.wiegandFormatText: String
+    get() = when {
+        lastWiegand?.startsWith("26bit") == true -> "26 bit"
+        lastWiegand?.startsWith("34bit") == true -> "34 bit"
+        lastWiegand?.startsWith("32bit") == true -> "32 bit raw"
+        lastWiegand != null -> "Unknown"
+        rawWiegandStatus != null -> "수신 중"
+        else -> "-"
+    }
 
 private data class UsbDeviceSnapshot(
     val deviceName: String,
@@ -1610,6 +2167,15 @@ private fun UsbDiagnosticPreview() {
                 input1 = "Pressed",
                 lastRawHex = "00 02 02 46"
             ),
+            rs232Logs = listOf(
+                SerialPortLog("TX", "41 42", "AB", "02 07 01 30 41 42 03")
+            ),
+            rs485Logs = listOf(
+                SerialPortLog("RX", "31 32", "12", "02 06 11 31 32 03")
+            ),
+            wiegandTxLogs = listOf(
+                WiegandOutputLog("Parity 출력", "00 02 02 46", "02 09 02 30 00 02 02 46 03")
+            ),
             logs = listOf("[12:00:00] 미리보기 로그"),
             adminMode = false,
             onRefresh = {},
@@ -1618,6 +2184,10 @@ private fun UsbDiagnosticPreview() {
             onConnectSerial = {},
             onDisconnectSerial = {},
             onWiegandQuery = {},
+            onWiegandOutput = { _, _ -> "미리보기" },
+            onWiegandClear = {},
+            onSerialSend = { _, _, _ -> "미리보기" },
+            onSerialClear = {},
             onRelayCommand = { _, _, _ -> }
         )
     }

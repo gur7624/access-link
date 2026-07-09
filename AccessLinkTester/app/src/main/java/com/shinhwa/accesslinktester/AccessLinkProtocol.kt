@@ -9,6 +9,10 @@ object AccessLinkProtocol {
     const val CMD_SET_RELAY_CONTROL: Int = 0x00
     const val CMD_SET_SERIAL_SEND: Int = 0x01
     const val CMD_SET_WIEGAND_OUT: Int = 0x02
+    // Protocol manual conflict:
+    // command list defines Wiegand Input as 0x09, while one response detail page shows 0x10.
+    // 0x10 is also defined as RS-232 receive, so the app keeps 0x09 for Wiegand Input
+    // until hardware evidence proves another mapping.
     const val CMD_GET_WIEGAND_INPUT_DATA: Int = 0x09
     const val CMD_GET_RECV_DATA_RS232: Int = 0x10
     const val CMD_GET_RECV_DATA_RS485: Int = 0x11
