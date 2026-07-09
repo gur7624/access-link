@@ -55,7 +55,21 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import com.shinhwa.accesslinktester.ui.dashboard.AllOffButton
+import com.shinhwa.accesslinktester.ui.dashboard.BrandTopBar
+import com.shinhwa.accesslinktester.ui.dashboard.DashboardBottomBar
+import com.shinhwa.accesslinktester.ui.dashboard.DashboardLogLine
+import com.shinhwa.accesslinktester.ui.dashboard.DashboardTab
+import com.shinhwa.accesslinktester.ui.dashboard.DigitalInputTile
+import com.shinhwa.accesslinktester.ui.dashboard.LiveLogCard
+import com.shinhwa.accesslinktester.ui.dashboard.RelayCard
+import com.shinhwa.accesslinktester.ui.dashboard.SectionLabel
+import com.shinhwa.accesslinktester.ui.dashboard.StatusTone
 import com.shinhwa.accesslinktester.ui.theme.AccessLinkTesterTheme
+import com.shinhwa.accesslinktester.ui.theme.ActiveBlue
+import com.shinhwa.accesslinktester.ui.theme.FailRed
+import com.shinhwa.accesslinktester.ui.theme.PassGreen
+import com.shinhwa.accesslinktester.ui.theme.WaitGray
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -166,7 +180,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
 
         setContent {
-            AccessLinkTesterTheme(dynamicColor = false) {
+            AccessLinkTesterTheme {
                 UsbDiagnosticApp(
                     devices = usbDevices,
                     serialState = serialState.value,
@@ -707,27 +721,48 @@ private fun UsbDiagnosticApp(
     onSerialClear: (SerialPort) -> Unit,
     onRelayCommand: (Int, Int, Int) -> Unit
 ) {
+    var selectedTab by remember { mutableStateOf(DashboardTab.DASHBOARD) }
+    val serialDevice = devices.firstOrNull { it.isAccessLinkSerial }
+
     Scaffold(
         modifier = Modifier.fillMaxSize(),
-        containerColor = Color(0xFFF5F7FA)
+        containerColor = MaterialTheme.colorScheme.background,
+        topBar = {
+            BrandTopBar(
+                connectionLabel = when {
+                    serialState.connected -> "연결됨"
+                    serialDevice == null -> "미연결"
+                    !serialDevice.hasPermission -> "권한 필요"
+                    else -> "연결 중"
+                },
+                connectionTone = when {
+                    serialState.connected -> StatusTone.PASS
+                    serialDevice == null -> StatusTone.WAIT
+                    else -> StatusTone.ACTIVE
+                },
+                chips = listOf(
+                    "USB Serial · CH340" to (serialDevice != null),
+                    "Ethernet" to ethernetState.connected,
+                    "권한 OK" to (serialDevice?.hasPermission == true)
+                ),
+                onRefresh = onRefresh,
+                onAdminToggle = onAdminToggle,
+                adminMode = adminMode
+            )
+        },
+        bottomBar = {
+            if (!adminMode) {
+                DashboardBottomBar(selected = selectedTab, onSelect = { selectedTab = it })
+            }
+        }
     ) { innerPadding ->
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .padding(16.dp),
+                .padding(horizontal = 16.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            item {
-                HeaderCard(
-                    connectedCount = devices.size,
-                    permissionCount = devices.count { it.hasPermission },
-                    adminMode = adminMode,
-                    onAdminToggle = onAdminToggle,
-                    onRefresh = onRefresh
-                )
-            }
-
             if (adminMode) {
                 item {
                     AdminDiagnosticsScreen(
@@ -750,47 +785,60 @@ private fun UsbDiagnosticApp(
                     )
                 }
             } else {
-                item {
-                    FieldPortDashboard(
-                        serialDevice = devices.firstOrNull { it.isAccessLinkSerial },
-                        serialState = serialState,
-                        ethernetState = ethernetState,
-                        portState = portState
-                    )
-                }
+                when (selectedTab) {
+                    DashboardTab.DASHBOARD -> {
+                        item {
+                            DashboardRelaySection(
+                                serialDevice = serialDevice,
+                                serialState = serialState,
+                                portState = portState,
+                                onRequestPermission = onRequestPermission,
+                                onRelayCommand = onRelayCommand
+                            )
+                        }
+                        item {
+                            DashboardInputSection(portState = portState)
+                        }
+                        item {
+                            LiveLogCard(
+                                lines = logs.toDashboardLogLines(),
+                                onViewAll = { selectedTab = DashboardTab.LOG }
+                            )
+                        }
+                        item {
+                            FieldPortDashboard(
+                                serialDevice = serialDevice,
+                                serialState = serialState,
+                                ethernetState = ethernetState,
+                                portState = portState
+                            )
+                        }
+                    }
 
-                item {
-                    SerialControlCard(
-                        serialDevice = devices.firstOrNull { it.isAccessLinkSerial },
-                        serialState = serialState,
-                        onRequestPermission = onRequestPermission,
-                        onRelayCommand = onRelayCommand
-                    )
-                }
+                    DashboardTab.SERIAL -> item {
+                        SerialTestCard(
+                            serialState = serialState,
+                            rs232Logs = rs232Logs,
+                            rs485Logs = rs485Logs,
+                            onSerialSend = onSerialSend,
+                            onSerialClear = onSerialClear
+                        )
+                    }
 
-                item {
-                    WiegandTestCard(
-                        serialState = serialState,
-                        portState = portState,
-                        txLogs = wiegandTxLogs,
-                        onWiegandQuery = onWiegandQuery,
-                        onWiegandOutput = onWiegandOutput,
-                        onWiegandClear = onWiegandClear
-                    )
-                }
+                    DashboardTab.WIEGAND -> item {
+                        WiegandTestCard(
+                            serialState = serialState,
+                            portState = portState,
+                            txLogs = wiegandTxLogs,
+                            onWiegandQuery = onWiegandQuery,
+                            onWiegandOutput = onWiegandOutput,
+                            onWiegandClear = onWiegandClear
+                        )
+                    }
 
-                item {
-                    SerialTestCard(
-                        serialState = serialState,
-                        rs232Logs = rs232Logs,
-                        rs485Logs = rs485Logs,
-                        onSerialSend = onSerialSend,
-                        onSerialClear = onSerialClear
-                    )
-                }
-
-                item {
-                    LogCard(logs = logs)
+                    DashboardTab.LOG -> item {
+                        LogCard(logs = logs, title = "전체 로그", limit = 80)
+                    }
                 }
             }
         }
@@ -798,85 +846,119 @@ private fun UsbDiagnosticApp(
 }
 
 @Composable
-private fun HeaderCard(
-    connectedCount: Int,
-    permissionCount: Int,
-    adminMode: Boolean,
-    onAdminToggle: () -> Unit,
-    onRefresh: () -> Unit
+private fun DashboardRelaySection(
+    serialDevice: UsbDeviceSnapshot?,
+    serialState: SerialUiState,
+    portState: PortDashboardState,
+    onRequestPermission: (UsbDeviceSnapshot) -> Unit,
+    onRelayCommand: (Int, Int, Int) -> Unit
 ) {
-    Card(
-        shape = RoundedCornerShape(8.dp),
-        colors = CardDefaults.cardColors(containerColor = Color(0xFF102033))
-    ) {
-        Column(
-            modifier = Modifier.padding(18.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text(
-                        text = "Access Link",
-                        style = MaterialTheme.typography.titleLarge,
-                        color = Color.White,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = onAdminToggle) {
-                        Text(if (adminMode) "메인" else "관리자")
-                    }
-                    Button(onClick = onRefresh) {
-                        Text("새로고침")
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        SectionLabel("RELAY OUTPUT · 릴레이 제어")
+        when {
+            serialDevice == null -> InfoCard {
+                Text("ACCESS LINK를 USB로 연결하세요")
+            }
+
+            !serialDevice.hasPermission -> InfoCard {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("릴레이 제어에 USB 권한이 필요합니다")
+                    Button(
+                        onClick = { onRequestPermission(serialDevice) },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("권한 요청")
                     }
                 }
             }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                StatusChip(
-                    text = if (connectedCount > 0) "연결" else "미연결",
-                    color = if (connectedCount > 0) PassGreen else WaitGray
-                )
-                StatusChip(
-                    text = if (permissionCount > 0) "권한" else "권한 필요",
-                    color = if (permissionCount > 0) ActiveBlue else WaitGray
-                )
+            else -> {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        RelayCard(
+                            title = "Relay 1",
+                            statusLabel = portState.relay0.toRelayStatusLabel(),
+                            statusTone = portState.relay0.toRelayStatusTone(),
+                            enabled = serialState.connected,
+                            onOn = { onRelayCommand(1, 1, 0) },
+                            onOff = { onRelayCommand(1, 0, 0) },
+                            modifier = Modifier.weight(1f)
+                        )
+                        RelayCard(
+                            title = "Relay 2",
+                            statusLabel = portState.relay1.toRelayStatusLabel(),
+                            statusTone = portState.relay1.toRelayStatusTone(),
+                            enabled = serialState.connected,
+                            onOn = { onRelayCommand(2, 1, 0) },
+                            onOff = { onRelayCommand(2, 0, 0) },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                    AllOffButton(
+                        enabled = serialState.connected,
+                        onClick = { onRelayCommand(0, 0, 0) }
+                    )
+                }
             }
         }
     }
 }
 
 @Composable
-private fun StatusSummary(devices: List<UsbDeviceSnapshot>) {
-    val title = when {
-        devices.isEmpty() -> "USB 장치가 아직 감지되지 않았습니다"
-        devices.any { it.hasPermission } -> "연결"
-        else -> "권한 요청 필요"
-    }
-    val color = when {
-        devices.isEmpty() -> WaitGray
-        devices.any { it.hasPermission } -> PassGreen
-        else -> ActiveBlue
-    }
-
-    InfoCard {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text("상태", style = MaterialTheme.typography.labelLarge, color = Color(0xFF5B6472))
-                Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            }
-            StatusChip(text = if (devices.any { it.hasPermission }) "PASS" else "CHECK", color = color)
+private fun DashboardInputSection(portState: PortDashboardState) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        SectionLabel("DIGITAL INPUT · 센서 입력")
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            DigitalInputTile(
+                label = "IN 0",
+                statusText = portState.input0.toInputTileText(),
+                active = portState.input0 == "Pressed",
+                detail = if (portState.input0 == null) "수신 대기" else "상태 수신됨",
+                modifier = Modifier.weight(1f)
+            )
+            DigitalInputTile(
+                label = "IN 1",
+                statusText = portState.input1.toInputTileText(),
+                active = portState.input1 == "Pressed",
+                detail = if (portState.input1 == null) "수신 대기" else "상태 수신됨",
+                modifier = Modifier.weight(1f)
+            )
         }
     }
 }
+
+// 릴레이 상태 문구 - 실제 접점 상태를 단정하지 않는다 (STEP_06 안전 조건)
+private fun String?.toRelayStatusLabel(): String = when {
+    this == null -> "UNKNOWN"
+    startsWith("OFF") -> "OFF 송신됨"
+    startsWith("ON") -> "ON 송신됨"
+    else -> this
+}
+
+private fun String?.toRelayStatusTone(): StatusTone = when {
+    this == null -> StatusTone.WAIT
+    startsWith("ON") -> StatusTone.PASS
+    else -> StatusTone.WAIT
+}
+
+private fun String?.toInputTileText(): String = when (this) {
+    null, "미확인" -> "UNKNOWN"
+    "Pressed" -> "PRESSED"
+    "Released" -> "RELEASED"
+    else -> this
+}
+
+// 시스템 로그 -> 대시보드 로그 라인 (송신=TX 파랑, 수신=RX 오렌지, 그 외=SYS)
+private fun List<String>.toDashboardLogLines(limit: Int = 5): List<DashboardLogLine> =
+    take(limit).map { raw ->
+        val text = raw.substringAfter("] ", raw)
+        val direction = when {
+            text.startsWith("송신") || text.startsWith("Wiegand 조회") -> "TX"
+            text.startsWith("수신") -> "RX"
+            else -> "SYS"
+        }
+        DashboardLogLine(direction = direction, text = text)
+    }
 
 @Composable
 private fun AdminDiagnosticsScreen(
@@ -2124,10 +2206,7 @@ private fun usbClassName(value: Int): String {
     }
 }
 
-private val PassGreen = Color(0xFF138A3D)
-private val FailRed = Color(0xFFC62828)
-private val ActiveBlue = Color(0xFF1565C0)
-private val WaitGray = Color(0xFF6B7280)
+
 
 @Preview(showBackground = true)
 @Composable
@@ -2156,7 +2235,7 @@ private fun UsbDiagnosticPreview() {
         )
     )
 
-    AccessLinkTesterTheme(dynamicColor = false) {
+    AccessLinkTesterTheme {
         UsbDiagnosticApp(
             devices = listOf(previewDevice),
             serialState = SerialUiState(connected = true, baudRate = 9600, status = "연결됨: 9600bps"),

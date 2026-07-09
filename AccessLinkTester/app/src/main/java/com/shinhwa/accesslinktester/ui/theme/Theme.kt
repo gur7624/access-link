@@ -1,53 +1,82 @@
 package com.shinhwa.accesslinktester.ui.theme
 
 import android.app.Activity
-import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.runtime.SideEffect
+import androidx.compose.ui.platform.LocalView
+import androidx.core.view.WindowCompat
 
-private val DarkColorScheme = darkColorScheme(
-    primary = Purple80,
-    secondary = PurpleGrey80,
-    tertiary = Pink80
+// ---------------------------------------------------------------------------
+// AccessLinkTester 브랜드 테마
+// - 기본 Purple 테마와 dynamicColor를 제거하고 브랜드 색으로 고정한다.
+//   (dynamicColor는 기기 배경화면 색이 브랜드 색을 덮어쓰므로 사용하지 않음)
+// - primary = 신화시스템 파랑, tertiary = ACCESS LINK 오렌지
+// ---------------------------------------------------------------------------
+
+private val LightColors = lightColorScheme(
+    primary = ShinhwaBlue,
+    onPrimary = CardSurface,
+    primaryContainer = ShinhwaBlueTint,
+    onPrimaryContainer = ShinhwaBlueDeep,
+    secondary = TextSecondary,
+    onSecondary = CardSurface,
+    tertiary = AccessOrange,
+    onTertiary = CardSurface,
+    tertiaryContainer = AccessOrangeTint,
+    onTertiaryContainer = AccessOrangeDeep,
+    error = FailRed,
+    onError = CardSurface,
+    errorContainer = FailRedTint,
+    onErrorContainer = FailRed,
+    background = AppBackground,
+    onBackground = TextPrimary,
+    surface = CardSurface,
+    onSurface = TextPrimary,
+    surfaceVariant = SubtleSurface,
+    onSurfaceVariant = TextSecondary,
+    outline = HairlineBorder
 )
 
-private val LightColorScheme = lightColorScheme(
-    primary = Purple40,
-    secondary = PurpleGrey40,
-    tertiary = Pink40
-
-    /* Other default colors to override
-    background = Color(0xFFFFFBFE),
-    surface = Color(0xFFFFFBFE),
-    onPrimary = Color.White,
-    onSecondary = Color.White,
-    onTertiary = Color.White,
-    onBackground = Color(0xFF1C1B1F),
-    onSurface = Color(0xFF1C1B1F),
-    */
+private val DarkColors = darkColorScheme(
+    primary = ShinhwaBlue,
+    onPrimary = DarkBackground,
+    primaryContainer = ShinhwaBlueDeep,
+    onPrimaryContainer = ShinhwaBlueTint,
+    secondary = DarkTextSecondary,
+    onSecondary = DarkBackground,
+    tertiary = AccessOrange,
+    onTertiary = DarkBackground,
+    tertiaryContainer = AccessOrangeDeep,
+    onTertiaryContainer = AccessOrangeTint,
+    error = FailRed,
+    onError = DarkBackground,
+    background = DarkBackground,
+    onBackground = DarkTextPrimary,
+    surface = DarkCardSurface,
+    onSurface = DarkTextPrimary,
+    surfaceVariant = DarkSubtleSurface,
+    onSurfaceVariant = DarkTextSecondary,
+    outline = DarkSubtleSurface
 )
 
 @Composable
 fun AccessLinkTesterTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
-    // Dynamic color is available on Android 12+
-    dynamicColor: Boolean = true,
     content: @Composable () -> Unit
 ) {
-    val colorScheme = when {
-        dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
-            val context = LocalContext.current
-            if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-        }
+    val colorScheme = if (darkTheme) DarkColors else LightColors
 
-        darkTheme -> DarkColorScheme
-        else -> LightColorScheme
+    val view = LocalView.current
+    if (!view.isInEditMode) {
+        SideEffect {
+            val window = (view.context as Activity).window
+            WindowCompat.getInsetsController(window, view)
+                .isAppearanceLightStatusBars = !darkTheme
+        }
     }
 
     MaterialTheme(
