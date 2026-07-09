@@ -55,12 +55,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
-import com.shinhwa.accesslinktester.ui.dashboard.AllOffButton
 import com.shinhwa.accesslinktester.ui.dashboard.BrandTopBar
 import com.shinhwa.accesslinktester.ui.dashboard.DashboardBottomBar
 import com.shinhwa.accesslinktester.ui.dashboard.DashboardLogLine
 import com.shinhwa.accesslinktester.ui.dashboard.DashboardTab
 import com.shinhwa.accesslinktester.ui.dashboard.DigitalInputTile
+import com.shinhwa.accesslinktester.ui.dashboard.DoorReleaseCard
 import com.shinhwa.accesslinktester.ui.dashboard.LiveLogCard
 import com.shinhwa.accesslinktester.ui.dashboard.RelayCard
 import com.shinhwa.accesslinktester.ui.dashboard.SectionLabel
@@ -361,7 +361,9 @@ class MainActivity : ComponentActivity() {
                 relay1 = if (useRelay == 0 || useRelay == 2) relayState else portState.value.relay1,
                 lastRelayHex = packet.toHexString()
             )
-            appendLog("송신 ${packet.toHexString()}")
+            appendLog(
+                "Relay ${relayTargetText(useRelay)} ${relayOutputText(outputType)} Time ${time.toString().padStart(2, '0')} 송신 ${packet.toHexString()}"
+            )
         } catch (exception: Exception) {
             appendLog("Relay 실패: ${exception.message ?: "알 수 없는 오류"}")
         }
@@ -853,8 +855,13 @@ private fun DashboardRelaySection(
     onRequestPermission: (UsbDeviceSnapshot) -> Unit,
     onRelayCommand: (Int, Int, Int) -> Unit
 ) {
+    var relay1ReleaseTime by remember { mutableStateOf("03") }
+    var relay2ReleaseTime by remember { mutableStateOf("03") }
+    var relay1ReleaseSignalOn by remember { mutableStateOf(false) }
+    var relay2ReleaseSignalOn by remember { mutableStateOf(false) }
+
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        SectionLabel("RELAY OUTPUT · 릴레이 제어")
+        SectionLabel("DOOR RELEASE · 문 개방")
         when {
             serialDevice == null -> InfoCard {
                 Text("ACCESS LINK를 USB로 연결하세요")
@@ -875,29 +882,43 @@ private fun DashboardRelaySection(
             else -> {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        RelayCard(
-                            title = "Relay 1",
-                            statusLabel = portState.relay0.toRelayStatusLabel(),
-                            statusTone = portState.relay0.toRelayStatusTone(),
+                        DoorReleaseCard(
+                            title = "문 1",
+                            statusLabel = portState.relay0.toDoorReleaseStatusLabel(relay1ReleaseSignalOn),
+                            statusTone = portState.relay0.toDoorReleaseStatusTone(relay1ReleaseSignalOn),
+                            timeValue = relay1ReleaseTime,
+                            releaseSignalOn = relay1ReleaseSignalOn,
                             enabled = serialState.connected,
-                            onOn = { onRelayCommand(1, 1, 0) },
-                            onOff = { onRelayCommand(1, 0, 0) },
+                            onTimeChange = { relay1ReleaseTime = it },
+                            onReleaseSignalChange = { relay1ReleaseSignalOn = it },
+                            onRelease = {
+                                onRelayCommand(
+                                    1,
+                                    relay1ReleaseSignalOn.toRelayOutputType(),
+                                    relay1ReleaseTime.toRelayTimeOrZero()
+                                )
+                            },
                             modifier = Modifier.weight(1f)
                         )
-                        RelayCard(
-                            title = "Relay 2",
-                            statusLabel = portState.relay1.toRelayStatusLabel(),
-                            statusTone = portState.relay1.toRelayStatusTone(),
+                        DoorReleaseCard(
+                            title = "문 2",
+                            statusLabel = portState.relay1.toDoorReleaseStatusLabel(relay2ReleaseSignalOn),
+                            statusTone = portState.relay1.toDoorReleaseStatusTone(relay2ReleaseSignalOn),
+                            timeValue = relay2ReleaseTime,
+                            releaseSignalOn = relay2ReleaseSignalOn,
                             enabled = serialState.connected,
-                            onOn = { onRelayCommand(2, 1, 0) },
-                            onOff = { onRelayCommand(2, 0, 0) },
+                            onTimeChange = { relay2ReleaseTime = it },
+                            onReleaseSignalChange = { relay2ReleaseSignalOn = it },
+                            onRelease = {
+                                onRelayCommand(
+                                    2,
+                                    relay2ReleaseSignalOn.toRelayOutputType(),
+                                    relay2ReleaseTime.toRelayTimeOrZero()
+                                )
+                            },
                             modifier = Modifier.weight(1f)
                         )
                     }
-                    AllOffButton(
-                        enabled = serialState.connected,
-                        onClick = { onRelayCommand(0, 0, 0) }
-                    )
                 }
             }
         }
@@ -935,10 +956,49 @@ private fun String?.toRelayStatusLabel(): String = when {
     else -> this
 }
 
+private fun String?.toDoorReleaseStatusLabel(releaseSignalOn: Boolean): String = when {
+    this == null -> "대기"
+    startsWith(releaseSignalOn.toRelayOutputText()) -> "개방 명령 송신됨"
+    startsWith("ON") || startsWith("OFF") -> "수동 명령 송신됨"
+    else -> this
+}
+
 private fun String?.toRelayStatusTone(): StatusTone = when {
     this == null -> StatusTone.WAIT
     startsWith("ON") -> StatusTone.PASS
     else -> StatusTone.WAIT
+}
+
+private fun String?.toDoorReleaseStatusTone(releaseSignalOn: Boolean): StatusTone = when {
+    this == null -> StatusTone.WAIT
+    startsWith(releaseSignalOn.toRelayOutputText()) -> StatusTone.PASS
+    startsWith("ON") || startsWith("OFF") -> StatusTone.ACTIVE
+    else -> StatusTone.WAIT
+}
+
+private fun Boolean.toRelayOutputType(): Int {
+    return if (this) 1 else 0
+}
+
+private fun Boolean.toRelayOutputText(): String {
+    return if (this) "ON" else "OFF"
+}
+
+private fun relayTargetText(useRelay: Int): String {
+    return when {
+        useRelay == 0 -> "전체"
+        useRelay == 1 -> "1"
+        useRelay == 2 -> "2"
+        else -> useRelay.toString()
+    }
+}
+
+private fun relayOutputText(outputType: Int): String {
+    return if (outputType == 1) "ON" else "OFF"
+}
+
+private fun String.toRelayTimeOrZero(): Int {
+    return toIntOrNull()?.coerceIn(0, 99) ?: 0
 }
 
 private fun String?.toInputTileText(): String = when (this) {

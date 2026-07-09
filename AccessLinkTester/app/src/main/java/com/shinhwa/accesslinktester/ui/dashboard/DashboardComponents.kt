@@ -21,6 +21,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -320,6 +321,98 @@ fun RelayCard(
                 ) {
                     Text("OFF", fontWeight = FontWeight.Bold)
                 }
+            }
+        }
+    }
+}
+
+@Composable
+fun DoorReleaseCard(
+    title: String,
+    statusLabel: String,
+    statusTone: StatusTone,
+    timeValue: String,
+    releaseSignalOn: Boolean,
+    enabled: Boolean,
+    onTimeChange: (String) -> Unit,
+    onReleaseSignalChange: (Boolean) -> Unit,
+    onRelease: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Card(
+        modifier = modifier,
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        border = androidx.compose.foundation.BorderStroke(
+            1.dp,
+            MaterialTheme.colorScheme.outline
+        )
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(title, fontWeight = FontWeight.Medium, fontSize = 14.sp)
+                Surface(color = statusTone.tint, shape = RoundedCornerShape(4.dp)) {
+                    Text(
+                        text = statusLabel,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                        fontSize = 10.sp,
+                        color = statusTone.solid,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+            }
+            OutlinedTextField(
+                value = timeValue,
+                onValueChange = { onTimeChange(it.filter { char -> char.isDigit() }.take(2)) },
+                enabled = enabled,
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                label = { Text("개방 시간 00~99") }
+            )
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    text = "개방 신호",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Button(
+                        onClick = { onReleaseSignalChange(false) },
+                        enabled = enabled && releaseSignalOn,
+                        modifier = Modifier.weight(1f).height(42.dp),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Text("12V 차단", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
+                    Button(
+                        onClick = { onReleaseSignalChange(true) },
+                        enabled = enabled && !releaseSignalOn,
+                        modifier = Modifier.weight(1f).height(42.dp),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Text("12V 인가", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+            Button(
+                onClick = onRelease,
+                enabled = enabled,
+                modifier = Modifier.fillMaxWidth().height(48.dp),
+                shape = RoundedCornerShape(8.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = AccessOrange,
+                    contentColor = Color.White
+                )
+            ) {
+                Text("문 개방", fontWeight = FontWeight.Bold)
             }
         }
     }
