@@ -1,0 +1,614 @@
+package com.shinhwa.accesslinktester
+
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import com.shinhwa.accesslinktester.data.ServiceStore
+import com.shinhwa.accesslinktester.model.AccessEvent
+import com.shinhwa.accesslinktester.model.AccessEventType
+import com.shinhwa.accesslinktester.model.CapturedCard
+import com.shinhwa.accesslinktester.model.CardOutcome
+import com.shinhwa.accesslinktester.model.DoorConfig
+import com.shinhwa.accesslinktester.model.EthernetUiState
+import com.shinhwa.accesslinktester.model.RegisteredCard
+import com.shinhwa.accesslinktester.model.SerialUiState
+import com.shinhwa.accesslinktester.model.ServiceSettings
+import com.shinhwa.accesslinktester.model.UsbDeviceSnapshot
+import com.shinhwa.accesslinktester.model.cardKeyOf
+import com.shinhwa.accesslinktester.model.cardNumberOf
+import com.shinhwa.accesslinktester.model.evaluateCard
+import com.shinhwa.accesslinktester.model.useRelayValue
+import com.shinhwa.accesslinktester.model.visibleToUser
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
+private const val RAW_32_CARD_BYTES = 4
+private const val RAW_32_BUFFER_TIMEOUT_MS = 300L
+private const val RAW_32_STABLE_WINDOW_MS = 2_000L
+private const val MAX_EVENTS = 200
+private const val MAX_SYSTEM_LOGS = 120
+private const val MAX_SERIAL_LOGS = 40
+private const val MAX_WIEGAND_TX_LOGS = 20
+
+/**
+ * 앱 상태 + 출입 서비스 로직의 단일 소유자.
+ * - 카드 인증 판정, 문 개방, 카드 등록 대기 모드, 장비 진단 상태를 관리한다.
+ * - Android/USB 배선(권한, 연결, 네트워크)은 MainActivity 가 담당하고
+ *   결과만 이 컨트롤러에 전달한다. 실제 송신은 [send] 로 위임한다.
+ */
+class AccessLinkAppController(
+    private val store: ServiceStore,
+    private val send: (ByteArray) -> Unit
+) {
+    // --- 서비스 상태 ---
+    var doors by mutableStateOf(store.loadDoors())
+        private set
+    var cards by mutableStateOf(store.loadCards())
+        private set
+    var settings by mutableStateOf(store.loadSettings())
+        private set
+
+    val accessEvents = mutableStateListOf<AccessEvent>()
+    val systemLogs = mutableStateListOf<String>()
+
+    // --- 통신/장비 상태 ---
+    var serialState by mutableStateOf(SerialUiState())
+        private set
+    var ethernetState by mutableStateOf(EthernetUiState())
+        private set
+    val usbDevices = mutableStateListOf<UsbDeviceSnapshot>()
+    var diagnostics by mutableStateOf(DiagnosticsState())
+        private set
+    val rs232Logs = mutableStateListOf<SerialPortLog>()
+    val rs485Logs = mutableStateListOf<SerialPortLog>()
+    val wiegandTxLogs = mutableStateListOf<WiegandOutputLog>()
+
+    // --- 관리자 인증 ---
+    var adminAuthenticated by mutableStateOf(false)
+        private set
+
+    // --- 카드 등록 대기 모드 ---
+    var registrationActive by mutableStateOf(false)
+        private set
+    var capturedCard by mutableStateOf<CapturedCard?>(null)
+        private set
+
+    // raw32 카드 수신 버퍼링 상태 (현장 검증 로직 · MainActivity 에서 이식)
+    private val raw32Buffer = ArrayDeque<Byte>()
+    private var raw32BufferUpdatedAt = 0L
+    private var lastRaw32CandidateHex: String? = null
+    private var lastRaw32CandidateAt = 0L
+    private var lastRaw32CandidateCount = 0
+
+    // -----------------------------------------------------------------------
+    // 관리자 인증
+    // -----------------------------------------------------------------------
+
+    fun tryAdminLogin(pin: String): Boolean {
+        val ok = AdminConfig.isValid(pin)
+        adminAuthenticated = ok
+        return ok
+    }
+
+    /** 사용자 화면으로 복귀하거나 백그라운드 진입 시 관리자 세션을 닫는다. */
+    fun leaveAdmin() {
+        adminAuthenticated = false
+        cancelCardRegistration()
+    }
+
+    // -----------------------------------------------------------------------
+    // 문 개방 (사용자/자동 공통) — OPEN 만 존재
+    // -----------------------------------------------------------------------
+
+    /**
+     * [index] 번 문을 개방한다. door.openSeconds 만큼 릴레이 ON 후 장비가 자동 OFF.
+     * @param auto 자동개방(카드 인증)에서 호출되면 true.
+     */
+    fun openDoor(index: Int, auto: Boolean = false) {
+        val door = doors.firstOrNull { it.index == index } ?: return
+        if (!auto && !door.visibleToUser()) return
+        val label = door.name.ifBlank { "Relay${door.index}" }
+        val packet = AccessLinkProtocol.relayControl(
+            useRelay = door.useRelayValue(),
+            outputType = 1,
+            time = door.openSeconds
+        )
+        if (sendPacket(packet, "$label 개방")) {
+            diagnostics = diagnostics.copy(lastRelayHex = packet.toHexString())
+            addEvent(
+                AccessEventType.OPEN,
+                personName = null,
+                cardNumber = null,
+                message = "$label 개방 송신",
+                detail = "${door.openSeconds}초"
+            )
+        } else {
+            addEvent(
+                AccessEventType.ERROR,
+                personName = null,
+                cardNumber = null,
+                message = "$label 개방 실패"
+            )
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 카드 인증 (onCardDetected)
+    // -----------------------------------------------------------------------
+
+    private fun onCardDetected(input: WiegandInput) {
+        val key = cardKeyOf(input)
+        val number = cardNumberOf(input)
+
+        if (registrationActive) {
+            capturedCard = CapturedCard(key, number)
+            logSystem("등록 대기: 카드 감지 $number")
+            return
+        }
+
+        when (val outcome = evaluateCard(key, number, cards, settings, doors)) {
+            is CardOutcome.Tag -> addEvent(
+                AccessEventType.TAG,
+                personName = outcome.personName,
+                cardNumber = number,
+                message = outcome.personName?.let { "$it 태그" } ?: "카드 태그"
+            )
+
+            is CardOutcome.Granted -> {
+                addEvent(
+                    AccessEventType.GRANTED,
+                    personName = outcome.personName,
+                    cardNumber = number,
+                    message = "${outcome.personName} 인증"
+                )
+                outcome.doorIndexes.forEach { openDoor(it, auto = true) }
+            }
+
+            is CardOutcome.Denied -> addEvent(
+                AccessEventType.DENIED,
+                personName = null,
+                cardNumber = number,
+                message = "미등록 카드"
+            )
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 카드 등록 대기 모드 (관리자)
+    // -----------------------------------------------------------------------
+
+    fun startCardRegistration() {
+        registrationActive = true
+        capturedCard = null
+        logSystem("카드 등록 대기 시작")
+    }
+
+    fun cancelCardRegistration() {
+        if (registrationActive || capturedCard != null) {
+            registrationActive = false
+            capturedCard = null
+        }
+    }
+
+    /** 감지된 카드에 이름을 붙여 저장. 성공 시 true. */
+    fun confirmCardRegistration(name: String): Boolean {
+        val captured = capturedCard ?: return false
+        val trimmed = name.trim()
+        if (trimmed.isEmpty()) return false
+        val next = cards.filterNot { it.key == captured.key } +
+            RegisteredCard(key = captured.key, name = trimmed, addedAt = System.currentTimeMillis())
+        cards = next
+        store.saveCards(next)
+        registrationActive = false
+        capturedCard = null
+        logSystem("카드 등록: $trimmed (${captured.cardNumber})")
+        return true
+    }
+
+    fun removeCard(key: String) {
+        val next = cards.filterNot { it.key == key }
+        cards = next
+        store.saveCards(next)
+    }
+
+    // -----------------------------------------------------------------------
+    // 문 설정 / 자동개방 설정 (관리자)
+    // -----------------------------------------------------------------------
+
+    fun updateDoor(door: DoorConfig) {
+        val next = doors.map { if (it.index == door.index) door else it }
+        doors = next
+        store.saveDoors(next)
+    }
+
+    fun updateSettings(newSettings: ServiceSettings) {
+        settings = newSettings
+        store.saveSettings(newSettings)
+    }
+
+    fun resetAllData() {
+        store.clearAll()
+        doors = ServiceStore.defaultDoors()
+        cards = emptyList()
+        settings = ServiceSettings()
+        accessEvents.clear()
+        cancelCardRegistration()
+        logSystem("데이터 초기화")
+    }
+
+    // -----------------------------------------------------------------------
+    // 장비 진단 액션 (관리자)
+    // -----------------------------------------------------------------------
+
+    fun queryWiegand() {
+        val packet = AccessLinkProtocol.getWiegandInputData()
+        if (sendPacket(packet, "Wiegand 조회")) {
+            raw32Buffer.clear()
+        }
+    }
+
+    fun sendWiegandOutput(useParity: Boolean, input: String): String {
+        val parseResult = WiegandPayloadCodec.parseOutputHex(input)
+        if (parseResult is WiegandPayloadParseResult.Error) {
+            val message = "Wiegand OUT 실패: ${parseResult.message}"
+            logSystem(message)
+            return message
+        }
+        val payload = (parseResult as WiegandPayloadParseResult.Success).bytes
+        val useParityValue = if (useParity) 0 else 1
+        val packet = AccessLinkProtocol.wiegandOut(useParityValue, payload)
+        return if (sendPacket(packet, "Wiegand OUT ${payload.size} bytes")) {
+            wiegandTxLogs.add(
+                0,
+                WiegandOutputLog(
+                    parity = if (useParity) "Parity 출력" else "Parity 미출력",
+                    dataHex = payload.toHexString(),
+                    packetHex = packet.toHexString()
+                )
+            )
+            trim(wiegandTxLogs, MAX_WIEGAND_TX_LOGS)
+            "Wiegand OUT TX ${payload.size} bytes"
+        } else {
+            "Wiegand OUT 실패"
+        }
+    }
+
+    fun sendSerial(port: SerialPort, mode: SerialInputMode, input: String): String {
+        val parseResult = SerialPayloadCodec.parse(input, mode)
+        if (parseResult is SerialPayloadParseResult.Error) {
+            val message = "${port.label} TX 실패: ${parseResult.message}"
+            logSystem(message)
+            return message
+        }
+        val payload = (parseResult as SerialPayloadParseResult.Success).bytes
+        val useSerialPort = when (port) {
+            SerialPort.RS232 -> 0
+            SerialPort.RS485 -> 1
+        }
+        val packet = AccessLinkProtocol.serialSend(useSerialPort, payload)
+        return if (sendPacket(packet, "${port.label} TX ${payload.size} bytes")) {
+            addSerialPortLog(
+                port,
+                SerialPortLog(
+                    direction = "TX",
+                    hex = payload.toHexString(),
+                    ascii = SerialPayloadCodec.safeAscii(payload),
+                    packetHex = packet.toHexString()
+                )
+            )
+            "${port.label} TX ${payload.size} bytes"
+        } else {
+            "${port.label} TX 실패"
+        }
+    }
+
+    fun clearSerial(port: SerialPort) {
+        when (port) {
+            SerialPort.RS232 -> rs232Logs.clear()
+            SerialPort.RS485 -> rs485Logs.clear()
+        }
+        logSystem("${port.label} 로그 초기화")
+    }
+
+    fun clearWiegandDiagnostics() {
+        raw32Buffer.clear()
+        lastRaw32CandidateHex = null
+        lastRaw32CandidateAt = 0L
+        lastRaw32CandidateCount = 0
+        wiegandTxLogs.clear()
+        diagnostics = diagnostics.copy(
+            lastWiegand = null,
+            rawWiegandStatus = null,
+            lastCardHex = null,
+            lastWiegandRawHex = null,
+            lastWiegandReceivedAt = null,
+            wiegandReceiveCount = 0
+        )
+        logSystem("Wiegand 초기화")
+    }
+
+    // -----------------------------------------------------------------------
+    // 연결/장치 상태 반영 (MainActivity → 컨트롤러)
+    // -----------------------------------------------------------------------
+
+    fun onConnectionStatus(status: AccessLinkConnectionStatus) {
+        serialState = SerialUiState(
+            connected = status.connected,
+            baudRate = status.baudRate,
+            status = when (status.state) {
+                AccessLinkConnectionState.DISCONNECTED -> status.message
+                AccessLinkConnectionState.CONNECTING -> "연결 중"
+                AccessLinkConnectionState.CONNECTED -> "연결됨: ${status.baudRate}bps"
+                AccessLinkConnectionState.ERROR -> status.message
+            }
+        )
+    }
+
+    fun setUsbDevices(devices: List<UsbDeviceSnapshot>) {
+        usbDevices.clear()
+        usbDevices.addAll(devices)
+    }
+
+    fun setEthernet(state: EthernetUiState) {
+        ethernetState = state
+    }
+
+    fun logSystem(message: String) {
+        systemLogs.add(0, "[${nowHms()}] $message")
+        trim(systemLogs, MAX_SYSTEM_LOGS)
+    }
+
+    fun handleConnectionEvent(event: AccessLinkConnectionEvent) {
+        when (event) {
+            is AccessLinkConnectionEvent.RawDataReceived -> {
+                if (!event.data.hasProtocolStart()) {
+                    onRawSerial(event.data)
+                }
+            }
+
+            is AccessLinkConnectionEvent.PacketReceived -> {
+                raw32Buffer.clear()
+                onPacket(event.packet.raw)
+                logSystem("수신 ${event.packet.raw.toHexString()} / ${AccessLinkProtocol.describeIncoming(event.packet.raw)}")
+            }
+
+            is AccessLinkConnectionEvent.ProtocolErrorReceived -> {
+                logSystem("프로토콜 오류: ${event.error.detail}")
+            }
+
+            is AccessLinkConnectionEvent.PacketSent -> {
+                // 송신 로그는 각 기능(openDoor/queryWiegand 등)에서 기록한다.
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 수신 처리 (raw32 + 프로토콜 패킷)
+    // -----------------------------------------------------------------------
+
+    private fun onPacket(data: ByteArray) {
+        if (!data.isAccessLinkPacket()) {
+            diagnostics = diagnostics.copy(lastRawHex = data.toHexString())
+            return
+        }
+        val command = data[2].toInt() and 0xFF
+        val payload = data.copyOfRange(3, data.size - 1)
+        val rawHex = data.toHexString()
+        when (command) {
+            AccessLinkProtocol.CMD_GET_WIEGAND_INPUT_DATA -> {
+                val decoded = AccessLinkProtocol.decodeWiegandInput(payload)
+                diagnostics = diagnostics.copy(
+                    lastWiegand = decoded.summary,
+                    rawWiegandStatus = null,
+                    lastCardHex = decoded.dataHex,
+                    lastWiegandRawHex = rawHex,
+                    lastWiegandReceivedAt = nowHms(),
+                    wiegandReceiveCount = diagnostics.wiegandReceiveCount + 1,
+                    lastRawHex = rawHex
+                )
+                onCardDetected(decoded)
+            }
+
+            AccessLinkProtocol.CMD_GET_RECV_DATA_RS232 -> {
+                addSerialPortLog(
+                    SerialPort.RS232,
+                    SerialPortLog("RX", payload.toHexString(), SerialPayloadCodec.safeAscii(payload), rawHex)
+                )
+                diagnostics = diagnostics.copy(lastRs232 = payload.toHexString(), lastRawHex = rawHex)
+            }
+
+            AccessLinkProtocol.CMD_GET_RECV_DATA_RS485 -> {
+                addSerialPortLog(
+                    SerialPort.RS485,
+                    SerialPortLog("RX", payload.toHexString(), SerialPayloadCodec.safeAscii(payload), rawHex)
+                )
+                diagnostics = diagnostics.copy(lastRs485 = payload.toHexString(), lastRawHex = rawHex)
+            }
+
+            AccessLinkProtocol.CMD_GET_INPUT_PORT_0 ->
+                diagnostics = diagnostics.copy(input0 = payload.toInputStatus(), lastRawHex = rawHex)
+
+            AccessLinkProtocol.CMD_GET_INPUT_PORT_1 ->
+                diagnostics = diagnostics.copy(input1 = payload.toInputStatus(), lastRawHex = rawHex)
+
+            AccessLinkProtocol.CMD_SET_RELAY_CONTROL ->
+                diagnostics = diagnostics.copy(lastRelayHex = rawHex, lastRawHex = rawHex)
+
+            else -> diagnostics = diagnostics.copy(lastRawHex = rawHex)
+        }
+    }
+
+    private fun onRawSerial(data: ByteArray) {
+        val rawHex = data.toHexString()
+        val raw32 = updateRaw32Candidate(data)
+        if (raw32 != null) {
+            val stable = markRaw32Candidate(raw32.dataHex)
+            if (stable) {
+                diagnostics = diagnostics.copy(
+                    lastWiegand = raw32.summary,
+                    rawWiegandStatus = null,
+                    lastCardHex = raw32.dataHex,
+                    lastWiegandRawHex = rawHex,
+                    lastWiegandReceivedAt = nowHms(),
+                    wiegandReceiveCount = diagnostics.wiegandReceiveCount + 1,
+                    lastRawHex = rawHex
+                )
+                logSystem("수신 $rawHex / 카드 확인: ${raw32.summary}")
+                onCardDetected(raw32)
+            } else {
+                diagnostics = diagnostics.copy(
+                    rawWiegandStatus = "반복 확인 ${raw32.summary}",
+                    lastRawHex = rawHex
+                )
+                logSystem("수신 $rawHex / 반복 확인: ${raw32.summary}")
+            }
+            return
+        }
+
+        diagnostics = diagnostics.copy(
+            rawWiegandStatus = if (data.size <= RAW_32_CARD_BYTES) "조각 수신 ${raw32Buffer.size}/4 bytes" else "원시 수신",
+            lastRawHex = rawHex
+        )
+        logSystem(
+            if (data.size <= RAW_32_CARD_BYTES) "수신 $rawHex / 조각 수신: ${raw32Buffer.size}/4 bytes"
+            else "수신 $rawHex / 원시 수신"
+        )
+    }
+
+    // raw32 조립: 300ms 조각조립 후 4바이트 확정
+    private fun updateRaw32Candidate(data: ByteArray): WiegandInput? {
+        val now = System.currentTimeMillis()
+        if (now - raw32BufferUpdatedAt > RAW_32_BUFFER_TIMEOUT_MS) {
+            raw32Buffer.clear()
+        }
+        raw32BufferUpdatedAt = now
+
+        if (data.size > RAW_32_CARD_BYTES) {
+            raw32Buffer.clear()
+            return null
+        }
+
+        data.forEach { byte -> raw32Buffer.addLast(byte) }
+        while (raw32Buffer.size > RAW_32_CARD_BYTES) {
+            raw32Buffer.removeFirst()
+        }
+
+        if (raw32Buffer.size != RAW_32_CARD_BYTES) return null
+        val candidate = AccessLinkProtocol.decodeRaw32Input(raw32Buffer.toByteArray())
+        raw32Buffer.clear()
+        return candidate
+    }
+
+    // raw32 안정화: 2초 내 동일 후보 2회 확정
+    private fun markRaw32Candidate(dataHex: String): Boolean {
+        val now = System.currentTimeMillis()
+        val sameCandidate = dataHex == lastRaw32CandidateHex && now - lastRaw32CandidateAt <= RAW_32_STABLE_WINDOW_MS
+        lastRaw32CandidateHex = dataHex
+        lastRaw32CandidateAt = now
+        lastRaw32CandidateCount = if (sameCandidate) lastRaw32CandidateCount + 1 else 1
+        return lastRaw32CandidateCount >= 2
+    }
+
+    // -----------------------------------------------------------------------
+    // 내부 유틸
+    // -----------------------------------------------------------------------
+
+    private fun sendPacket(packet: ByteArray, label: String): Boolean {
+        return try {
+            send(packet)
+            logSystem("송신 $label ${packet.toHexString()}")
+            true
+        } catch (exception: Exception) {
+            logSystem("송신 실패 $label: ${exception.message ?: "알 수 없는 오류"}")
+            false
+        }
+    }
+
+    private fun addEvent(
+        type: AccessEventType,
+        personName: String?,
+        cardNumber: String?,
+        message: String,
+        detail: String? = null
+    ) {
+        accessEvents.add(
+            0,
+            AccessEvent(
+                time = nowHms(),
+                type = type,
+                personName = personName,
+                cardNumber = cardNumber,
+                message = message,
+                detail = detail
+            )
+        )
+        trim(accessEvents, MAX_EVENTS)
+    }
+
+    private fun addSerialPortLog(port: SerialPort, entry: SerialPortLog) {
+        val target = when (port) {
+            SerialPort.RS232 -> rs232Logs
+            SerialPort.RS485 -> rs485Logs
+        }
+        target.add(0, entry)
+        trim(target, MAX_SERIAL_LOGS)
+    }
+
+    private fun <T> trim(list: MutableList<T>, max: Int) {
+        while (list.size > max) {
+            list.removeAt(list.size - 1)
+        }
+    }
+}
+
+data class DiagnosticsState(
+    val lastWiegand: String? = null,
+    val rawWiegandStatus: String? = null,
+    val lastCardHex: String? = null,
+    val lastWiegandRawHex: String? = null,
+    val lastWiegandReceivedAt: String? = null,
+    val wiegandReceiveCount: Int = 0,
+    val lastRs232: String? = null,
+    val lastRs485: String? = null,
+    val input0: String? = null,
+    val input1: String? = null,
+    val lastRelayHex: String? = null,
+    val lastRawHex: String? = null
+)
+
+data class SerialPortLog(
+    val direction: String,
+    val hex: String,
+    val ascii: String,
+    val packetHex: String
+)
+
+data class WiegandOutputLog(
+    val parity: String,
+    val dataHex: String,
+    val packetHex: String
+)
+
+val SerialPort.label: String
+    get() = when (this) {
+        SerialPort.RS232 -> "RS-232"
+        SerialPort.RS485 -> "RS-485"
+    }
+
+private fun nowHms(): String = SimpleDateFormat("HH:mm:ss", Locale.KOREA).format(Date())
+
+private fun ByteArray.isAccessLinkPacket(): Boolean =
+    size >= 4 && first() == 0x02.toByte() && last() == 0x03.toByte()
+
+private fun ByteArray.hasProtocolStart(): Boolean = any { it == 0x02.toByte() }
+
+private fun ByteArray.toInputStatus(): String {
+    val value = firstOrNull()?.toInt()?.and(0xFF) ?: return "미확인"
+    return when (value) {
+        0, '0'.code -> "Released"
+        1, '1'.code -> "Pressed"
+        else -> "Unknown ${toHexString()}"
+    }
+}
