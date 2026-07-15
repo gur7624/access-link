@@ -12,6 +12,7 @@ import com.shinhwa.accesslinktester.model.CardOutcome
 import com.shinhwa.accesslinktester.model.DoorConfig
 import com.shinhwa.accesslinktester.model.EthernetUiState
 import com.shinhwa.accesslinktester.model.RegisteredCard
+import com.shinhwa.accesslinktester.model.RegisteredFace
 import com.shinhwa.accesslinktester.model.SerialUiState
 import com.shinhwa.accesslinktester.model.ServiceSettings
 import com.shinhwa.accesslinktester.model.UsbDeviceSnapshot
@@ -23,6 +24,7 @@ import com.shinhwa.accesslinktester.model.visibleToUser
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.sqrt
 
 private const val RAW_32_CARD_BYTES = 4
 private const val RAW_32_BUFFER_TIMEOUT_MS = 300L
@@ -31,6 +33,10 @@ private const val MAX_EVENTS = 200
 private const val MAX_SYSTEM_LOGS = 120
 private const val MAX_SERIAL_LOGS = 40
 private const val MAX_WIEGAND_TX_LOGS = 20
+private const val FACE_EMBEDDING_SIZE = 128
+private const val FACE_MATCH_L2_THRESHOLD = 10f
+private const val FACE_OPEN_COOLDOWN_MS = 8_000L
+private const val FACE_FAILURE_LOG_INTERVAL_MS = 3_000L
 
 /**
  * 앱 상태 + 출입 서비스 로직의 단일 소유자.
@@ -46,6 +52,8 @@ class AccessLinkAppController(
     var doors by mutableStateOf(store.loadDoors())
         private set
     var cards by mutableStateOf(store.loadCards())
+        private set
+    var faces by mutableStateOf(store.loadFaces())
         private set
     var settings by mutableStateOf(store.loadSettings())
         private set
@@ -81,6 +89,8 @@ class AccessLinkAppController(
     private var lastRaw32CandidateHex: String? = null
     private var lastRaw32CandidateAt = 0L
     private var lastRaw32CandidateCount = 0
+    private var lastFaceOpenAt = 0L
+    private var lastFaceFailureLogAt = 0L
 
     // -----------------------------------------------------------------------
     // 관리자 인증
@@ -132,6 +142,96 @@ class AccessLinkAppController(
                 message = "$label 개방 실패"
             )
         }
+    }
+
+    /**
+     * 등록 얼굴 인증 성공 후 문 개방.
+     * 자동개방 대상 문이 있으면 그 문을 열고, 대상이 없을 때 사용자 노출 문이 1개뿐이면 그 문만 연다.
+     * 여러 문이 있는데 대상 지정이 없으면 임의 개방하지 않는다.
+     */
+    fun openDoorAfterFaceAuth(personName: String): Boolean {
+        val visibleDoors = doors.filter { it.visibleToUser() }
+        val configuredTargets = visibleDoors.filter { it.index in settings.autoOpenDoorIndexes }
+        val targets = configuredTargets.ifEmpty {
+            visibleDoors.takeIf { it.size == 1 }.orEmpty()
+        }
+
+        if (targets.isEmpty()) {
+            addEvent(
+                AccessEventType.ERROR,
+                personName = null,
+                cardNumber = null,
+                message = "안면 인증 후 개방 대상 없음"
+            )
+            logSystem("안면 인증 성공, 개방 대상 없음")
+            return false
+        }
+
+        addEvent(
+            AccessEventType.FACE,
+            personName = personName,
+            cardNumber = null,
+            message = "$personName 안면 인증"
+        )
+        targets.forEach { openDoor(it.index, auto = true) }
+        return true
+    }
+
+    fun evaluateFaceEmbedding(embedding: FloatArray): FaceAuthDecision {
+        if (!serialState.connected) {
+            return FaceAuthDecision.Blocked("장비가 연결되지 않았습니다")
+        }
+
+        val candidates = faces.filter { it.embedding.size == FACE_EMBEDDING_SIZE }
+        if (candidates.isEmpty()) {
+            return FaceAuthDecision.Blocked("등록된 얼굴이 없습니다")
+        }
+
+        val best = candidates
+            .map { face -> face to l2Distance(embedding, face.embedding) }
+            .minByOrNull { it.second }
+            ?: return FaceAuthDecision.Blocked("등록된 얼굴이 없습니다")
+
+        val now = System.currentTimeMillis()
+        val face = best.first
+        val distance = best.second
+
+        if (distance <= FACE_MATCH_L2_THRESHOLD) {
+            if (now - lastFaceOpenAt >= FACE_OPEN_COOLDOWN_MS) {
+                lastFaceOpenAt = now
+                openDoorAfterFaceAuth(face.name)
+            }
+            return FaceAuthDecision.Granted(
+                personName = face.name,
+                distance = distance,
+                message = "${face.name} 인증되었습니다"
+            )
+        }
+
+        if (now - lastFaceFailureLogAt >= FACE_FAILURE_LOG_INTERVAL_MS) {
+            lastFaceFailureLogAt = now
+            addEvent(
+                AccessEventType.DENIED,
+                personName = null,
+                cardNumber = null,
+                message = "등록되지 않은 사용자입니다",
+                detail = "얼굴 거리 ${"%.2f".format(Locale.US, distance)}"
+            )
+        }
+        return FaceAuthDecision.Denied(
+            distance = distance,
+            message = "등록되지 않은 사용자입니다"
+        )
+    }
+
+    fun recordFaceAuthFailure(message: String) {
+        addEvent(
+            AccessEventType.ERROR,
+            personName = null,
+            cardNumber = null,
+            message = message
+        )
+        logSystem(message)
     }
 
     // -----------------------------------------------------------------------
@@ -213,6 +313,28 @@ class AccessLinkAppController(
         store.saveCards(next)
     }
 
+    fun registerFace(name: String, embedding: FloatArray?): Boolean {
+        val trimmed = name.trim()
+        if (trimmed.isEmpty() || embedding == null || embedding.size != FACE_EMBEDDING_SIZE) return false
+        val now = System.currentTimeMillis()
+        val next = faces + RegisteredFace(
+            id = "face-$now",
+            name = trimmed,
+            addedAt = now,
+            embedding = embedding.toList()
+        )
+        faces = next
+        store.saveFaces(next)
+        logSystem("얼굴 등록: $trimmed")
+        return true
+    }
+
+    fun removeFace(id: String) {
+        val next = faces.filterNot { it.id == id }
+        faces = next
+        store.saveFaces(next)
+    }
+
     // -----------------------------------------------------------------------
     // 문 설정 / 자동개방 설정 (관리자)
     // -----------------------------------------------------------------------
@@ -232,6 +354,7 @@ class AccessLinkAppController(
         store.clearAll()
         doors = ServiceStore.defaultDoors()
         cards = emptyList()
+        faces = emptyList()
         settings = ServiceSettings()
         accessEvents.clear()
         cancelCardRegistration()
@@ -561,6 +684,32 @@ class AccessLinkAppController(
             list.removeAt(list.size - 1)
         }
     }
+
+    private fun l2Distance(left: FloatArray, right: List<Float>): Float {
+        return sqrt(left.mapIndexed { index, value ->
+            val diff = value - right[index]
+            diff * diff
+        }.sum())
+    }
+}
+
+sealed interface FaceAuthDecision {
+    val message: String
+
+    data class Granted(
+        val personName: String,
+        val distance: Float,
+        override val message: String
+    ) : FaceAuthDecision
+
+    data class Denied(
+        val distance: Float,
+        override val message: String
+    ) : FaceAuthDecision
+
+    data class Blocked(
+        override val message: String
+    ) : FaceAuthDecision
 }
 
 data class DiagnosticsState(

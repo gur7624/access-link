@@ -38,6 +38,14 @@ data class RegisteredCard(
     val addedAt: Long
 )
 
+/** 등록 얼굴. 얼굴 특징값은 전용 얼굴 비교 모델 연결 시 추가한다. */
+data class RegisteredFace(
+    val id: String,
+    val name: String,
+    val addedAt: Long,
+    val embedding: List<Float> = emptyList()
+)
+
 /** 카드 등록 대기 모드에서 감지된 카드 원본. */
 data class CapturedCard(
     val key: String,
@@ -45,7 +53,7 @@ data class CapturedCard(
 )
 
 /** 출입 이벤트 = "누가·언제·카드번호"의 핵심 기록. */
-enum class AccessEventType { OPEN, GRANTED, DENIED, TAG, INPUT, SYSTEM, ERROR }
+enum class AccessEventType { OPEN, GRANTED, DENIED, TAG, FACE, INPUT, SYSTEM, ERROR }
 
 data class AccessEvent(
     val time: String,          // HH:mm:ss (필요시 날짜 포함)

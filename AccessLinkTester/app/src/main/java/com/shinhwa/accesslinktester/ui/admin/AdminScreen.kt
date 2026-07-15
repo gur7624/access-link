@@ -45,6 +45,7 @@ import com.shinhwa.accesslinktester.ui.theme.ShinhwaBlue
 private enum class AdminTab(val label: String) {
     DOORS("문 설정"),
     CARDS("카드"),
+    FACES("얼굴"),
     AUTO("자동 개방"),
     DEVICE("장비"),
     SYSTEM("시스템")
@@ -95,6 +96,8 @@ fun AdminScreen(
                     )
 
                     AdminTab.CARDS -> CardManageSection(controller = controller)
+
+                    AdminTab.FACES -> FaceManageSection(controller = controller)
 
                     AdminTab.AUTO -> AutoOpenSection(
                         settings = controller.settings,

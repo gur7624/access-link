@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import com.shinhwa.accesslinktester.model.DoorConfig
 import com.shinhwa.accesslinktester.model.RegisteredCard
+import com.shinhwa.accesslinktester.model.RegisteredFace
 import com.shinhwa.accesslinktester.model.ServiceSettings
 import org.json.JSONArray
 import org.json.JSONObject
@@ -81,6 +82,40 @@ class ServiceStore(context: Context) {
         prefs.edit().putString(KEY_CARDS, array.toString()).apply()
     }
 
+    // --- 얼굴 ---
+
+    fun loadFaces(): List<RegisteredFace> {
+        val raw = prefs.getString(KEY_FACES, null) ?: return emptyList()
+        return runCatching {
+            val array = JSONArray(raw)
+            (0 until array.length()).map { i ->
+                val obj = array.getJSONObject(i)
+                RegisteredFace(
+                    id = obj.getString("id"),
+                    name = obj.optString("name", ""),
+                    addedAt = obj.optLong("addedAt", 0L),
+                    embedding = obj.optJSONArray("embedding")?.let { array ->
+                        (0 until array.length()).map { index -> array.optDouble(index, 0.0).toFloat() }
+                    }.orEmpty()
+                )
+            }
+        }.getOrElse { emptyList() }
+    }
+
+    fun saveFaces(faces: List<RegisteredFace>) {
+        val array = JSONArray()
+        faces.forEach { face ->
+            array.put(
+                JSONObject()
+                    .put("id", face.id)
+                    .put("name", face.name)
+                    .put("addedAt", face.addedAt)
+                    .put("embedding", JSONArray().apply { face.embedding.forEach { put(it) } })
+            )
+        }
+        prefs.edit().putString(KEY_FACES, array.toString()).apply()
+    }
+
     // --- 서비스 설정 ---
 
     fun loadSettings(): ServiceSettings {
@@ -115,6 +150,7 @@ class ServiceStore(context: Context) {
         private const val PREFS_NAME = "access_link_service"
         private const val KEY_DOORS = "doors"
         private const val KEY_CARDS = "cards"
+        private const val KEY_FACES = "faces"
         private const val KEY_SETTINGS = "settings"
 
         /** 문은 항상 Relay0/Relay1 두 개. 기본 이름 없음/미사용/3초. */

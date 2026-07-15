@@ -37,7 +37,7 @@ import com.shinhwa.accesslinktester.ui.theme.WaitGray
 private enum class LogFilter(val label: String, val types: Set<AccessEventType>?) {
     ALL("전체", null),
     OPEN("개방", setOf(AccessEventType.OPEN)),
-    GRANTED("인증", setOf(AccessEventType.GRANTED, AccessEventType.TAG)),
+    GRANTED("인증", setOf(AccessEventType.GRANTED, AccessEventType.TAG, AccessEventType.FACE)),
     DENIED("거부", setOf(AccessEventType.DENIED))
 }
 
@@ -144,7 +144,7 @@ private fun AccessEventType.tone(): Color = when (this) {
     AccessEventType.OPEN -> AccessOrange
     AccessEventType.GRANTED -> PassGreen
     AccessEventType.DENIED, AccessEventType.ERROR -> FailRed
-    AccessEventType.TAG, AccessEventType.INPUT -> ActiveBlue
+    AccessEventType.TAG, AccessEventType.FACE, AccessEventType.INPUT -> ActiveBlue
     AccessEventType.SYSTEM -> WaitGray
 }
 
@@ -153,6 +153,7 @@ private fun AccessEventType.badge(): String = when (this) {
     AccessEventType.GRANTED -> "인증"
     AccessEventType.DENIED -> "거부"
     AccessEventType.TAG -> "태그"
+    AccessEventType.FACE -> "안면"
     AccessEventType.INPUT -> "입력"
     AccessEventType.SYSTEM -> "시스템"
     AccessEventType.ERROR -> "오류"
