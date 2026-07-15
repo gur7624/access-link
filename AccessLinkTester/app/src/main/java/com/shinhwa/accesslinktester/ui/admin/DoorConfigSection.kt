@@ -34,7 +34,17 @@ fun DoorConfigSection(
     onUpdateDoor: (DoorConfig) -> Unit
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        SectionLabel("DOOR · 문 설정")
+        SectionLabel("문·릴레이 설정")
+        InfoCard {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("릴레이와 문 매핑", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Text(
+                    "장비 1대는 Relay 0/1 두 개를 제어합니다. 현장 배선에 맞춰 각 릴레이가 어느 문을 여는지 이름과 개방 시간을 지정하세요.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
         doors.forEach { door ->
             DoorConfigCard(door = door, onUpdateDoor = onUpdateDoor)
         }
@@ -58,7 +68,7 @@ private fun DoorConfigCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    "Relay ${door.index}",
+                    "Relay ${door.index} 배선",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold
                 )

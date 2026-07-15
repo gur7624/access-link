@@ -35,7 +35,7 @@ fun FaceManageSection(controller: AccessLinkAppController) {
     var error by remember { mutableStateOf(false) }
 
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        SectionLabel("FACE · 얼굴 등록")
+        SectionLabel("얼굴 등록·삭제")
 
         InfoCard {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {

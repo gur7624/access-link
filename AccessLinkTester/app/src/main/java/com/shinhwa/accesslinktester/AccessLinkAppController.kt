@@ -33,6 +33,7 @@ private const val MAX_EVENTS = 200
 private const val MAX_SYSTEM_LOGS = 120
 private const val MAX_SERIAL_LOGS = 40
 private const val MAX_WIEGAND_TX_LOGS = 20
+private const val MAX_RELAY_LOGS = 20
 private const val FACE_EMBEDDING_SIZE = 128
 private const val FACE_MATCH_L2_THRESHOLD = 10f
 private const val FACE_OPEN_COOLDOWN_MS = 8_000L
@@ -72,6 +73,7 @@ class AccessLinkAppController(
     val rs232Logs = mutableStateListOf<SerialPortLog>()
     val rs485Logs = mutableStateListOf<SerialPortLog>()
     val wiegandTxLogs = mutableStateListOf<WiegandOutputLog>()
+    val relayLogs = mutableStateListOf<RelayControlLog>()
 
     // --- 관리자 인증 ---
     var adminAuthenticated by mutableStateOf(false)
@@ -141,6 +143,42 @@ class AccessLinkAppController(
                 cardNumber = null,
                 message = "$label 개방 실패"
             )
+        }
+    }
+
+    fun sendRelayControl(useRelay: Int, outputType: Int, time: Int): String {
+        val relayLabel = when (useRelay) {
+            0 -> "Relay 0+1"
+            1 -> "Relay 0"
+            2 -> "Relay 1"
+            else -> return "릴레이 선택 오류"
+        }
+        val outputLabel = when (outputType) {
+            0 -> "OFF"
+            1 -> if (time == 0) "지속 ON" else "${time}초 ON"
+            else -> return "출력 방식 오류"
+        }
+        val safeTime = time.coerceIn(0, 99)
+        val packet = AccessLinkProtocol.relayControl(
+            useRelay = useRelay,
+            outputType = outputType,
+            time = safeTime
+        )
+
+        return if (sendPacket(packet, "$relayLabel $outputLabel")) {
+            diagnostics = diagnostics.copy(lastRelayHex = packet.toHexString())
+            relayLogs.add(
+                0,
+                RelayControlLog(
+                    relay = relayLabel,
+                    command = outputLabel,
+                    packetHex = packet.toHexString()
+                )
+            )
+            trim(relayLogs, MAX_RELAY_LOGS)
+            "$relayLabel $outputLabel 송신"
+        } else {
+            "$relayLabel $outputLabel 실패"
         }
     }
 
@@ -737,6 +775,12 @@ data class SerialPortLog(
 data class WiegandOutputLog(
     val parity: String,
     val dataHex: String,
+    val packetHex: String
+)
+
+data class RelayControlLog(
+    val relay: String,
+    val command: String,
     val packetHex: String
 )
 

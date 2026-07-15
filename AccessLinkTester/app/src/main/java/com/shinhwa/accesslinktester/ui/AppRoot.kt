@@ -3,22 +3,14 @@ package com.shinhwa.accesslinktester.ui
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.shinhwa.accesslinktester.AccessLinkAppController
 import com.shinhwa.accesslinktester.model.UsbDeviceSnapshot
 import com.shinhwa.accesslinktester.ui.admin.AdminGate
@@ -78,18 +70,9 @@ fun AppRoot(
                 registeredFaceCount = controller.faces.size,
                 recentEvents = controller.accessEvents,
                 onOpenDoor = { controller.openDoor(it) },
-                onFaceEmbedding = { controller.evaluateFaceEmbedding(it) }
+                onFaceEmbedding = { controller.evaluateFaceEmbedding(it) },
+                onAdminClick = { adminRoute = AdminRoute.GATE }
             )
-            OutlinedButton(
-                onClick = { adminRoute = AdminRoute.GATE },
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(top = 14.dp, end = 18.dp),
-                shape = RoundedCornerShape(8.dp),
-                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White)
-            ) {
-                Text("관리자", fontSize = 12.sp)
-            }
         }
     }
 }

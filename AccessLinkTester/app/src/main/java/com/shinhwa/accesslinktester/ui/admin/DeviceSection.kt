@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
@@ -13,6 +14,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -22,7 +24,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.text.KeyboardOptions
 import com.shinhwa.accesslinktester.AccessLinkAppController
 import com.shinhwa.accesslinktester.SerialInputMode
 import com.shinhwa.accesslinktester.SerialPort
@@ -48,14 +53,237 @@ fun DeviceSection(
     onRequestPermission: (UsbDeviceSnapshot) -> Unit,
     onRefreshDevices: () -> Unit
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        SectionLabel("DEVICE · 장비 진단")
+    var route by remember { mutableStateOf(DeviceDiagnosticRoute.HOME) }
 
-        ConnectionCard(controller, onConnectSerial, onDisconnectSerial, onRefreshDevices)
-        WiegandDiagnosticsCard(controller)
-        SerialDiagnosticsCard(controller, SerialPort.RS232)
-        SerialDiagnosticsCard(controller, SerialPort.RS485)
-        UsbDeviceListCard(controller, onRequestPermission)
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        when (val currentRoute = route) {
+            DeviceDiagnosticRoute.HOME -> DeviceDiagnosticHome(
+                controller = controller,
+                onNavigate = { route = it }
+            )
+
+            else -> {
+                DiagnosticPageHeader(
+                    title = currentRoute.title,
+                    onBack = { route = DeviceDiagnosticRoute.HOME }
+                )
+                when (currentRoute) {
+                    DeviceDiagnosticRoute.CONNECTION -> {
+                        ConnectionCard(controller, onConnectSerial, onDisconnectSerial, onRefreshDevices)
+                        UsbDeviceListCard(controller, onRequestPermission)
+                    }
+
+                    DeviceDiagnosticRoute.RELAY -> RelayDiagnosticsCard(controller)
+                    DeviceDiagnosticRoute.WIEGAND -> WiegandDiagnosticsCard(controller)
+                    DeviceDiagnosticRoute.RS232 -> SerialDiagnosticsCard(controller, SerialPort.RS232)
+                    DeviceDiagnosticRoute.RS485 -> SerialDiagnosticsCard(controller, SerialPort.RS485)
+                    DeviceDiagnosticRoute.HOME -> Unit
+                }
+            }
+        }
+    }
+}
+
+private enum class DeviceDiagnosticRoute(val title: String) {
+    HOME("장비 진단"),
+    CONNECTION("장비 연결"),
+    RELAY("릴레이 테스트"),
+    WIEGAND("카드 리더기 데이터"),
+    RS232("RS-232 통신"),
+    RS485("RS-485 통신")
+}
+
+@Composable
+private fun DeviceDiagnosticHome(
+    controller: AccessLinkAppController,
+    onNavigate: (DeviceDiagnosticRoute) -> Unit
+) {
+    val serial = controller.serialState
+    val diagnostics = controller.diagnostics
+
+    SectionLabel("현장 장비 점검")
+    InfoCard {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("무엇을 확인하시겠습니까?", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Text(
+                "기능별 화면에서 연결 상태와 수신·송신 결과를 자세히 확인할 수 있습니다.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            DetailGrid(
+                items = listOf(
+                    "장비 통신" to if (serial.connected) "연결됨" else "연결 필요",
+                    "USB 장치" to "${controller.usbDevices.size}개",
+                    "최근 카드" to (diagnostics.lastCardHex ?: "없음"),
+                    "최근 릴레이" to (diagnostics.lastRelayHex ?: "없음")
+                )
+            )
+        }
+    }
+
+    DiagnosticMenuButton(
+        title = "장비 연결",
+        description = "USB 권한, CH340, 통신 속도, 네트워크 링크",
+        onClick = { onNavigate(DeviceDiagnosticRoute.CONNECTION) }
+    )
+    DiagnosticMenuButton(
+        title = "릴레이 테스트",
+        description = "Relay 0·1에 지정 시간 ON 명령을 보내 배선을 확인",
+        onClick = { onNavigate(DeviceDiagnosticRoute.RELAY) }
+    )
+    DiagnosticMenuButton(
+        title = "카드 리더기 데이터",
+        description = "Wiegand 카드번호, Raw HEX, 수신 횟수 확인",
+        onClick = { onNavigate(DeviceDiagnosticRoute.WIEGAND) }
+    )
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+        DiagnosticMenuButton(
+            title = "RS-232 통신",
+            description = "ASCII·HEX 송수신",
+            onClick = { onNavigate(DeviceDiagnosticRoute.RS232) },
+            modifier = Modifier.weight(1f)
+        )
+        DiagnosticMenuButton(
+            title = "RS-485 통신",
+            description = "ASCII·HEX 송수신",
+            onClick = { onNavigate(DeviceDiagnosticRoute.RS485) },
+            modifier = Modifier.weight(1f)
+        )
+    }
+}
+
+@Composable
+private fun DiagnosticPageHeader(title: String, onBack: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+        TextButton(onClick = onBack) { Text("뒤로") }
+    }
+}
+
+@Composable
+private fun DiagnosticMenuButton(
+    title: String,
+    description: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    OutlinedButton(
+        onClick = onClick,
+        modifier = modifier.fillMaxWidth().heightIn(min = 78.dp),
+        shape = RoundedCornerShape(10.dp)
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(title, fontWeight = FontWeight.Bold)
+            Text(description, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+@Composable
+private fun RelayDiagnosticsCard(controller: AccessLinkAppController) {
+    val connected = controller.serialState.connected
+    var selectedRelay by remember { mutableStateOf(1) }
+    var seconds by remember { mutableStateOf("3") }
+    var statusText by remember { mutableStateOf("대기") }
+    val pulseSeconds = seconds.toIntOrNull()?.coerceIn(1, 99) ?: 3
+
+    InfoCard {
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("릴레이 진단", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    Text(
+                        "현장 배선 확인용입니다. 실제 릴레이 상태를 단정하지 않고 송신 결과만 표시합니다.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                StatusChip(statusText, if (statusText.contains("실패")) FailRed else ActiveBlue)
+            }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                RelaySelectButton("Relay 0", selectedRelay == 1, { selectedRelay = 1 }, Modifier.weight(1f))
+                RelaySelectButton("Relay 1", selectedRelay == 2, { selectedRelay = 2 }, Modifier.weight(1f))
+                RelaySelectButton("전체", selectedRelay == 0, { selectedRelay = 0 }, Modifier.weight(1f))
+            }
+
+            OutlinedTextField(
+                value = seconds,
+                onValueChange = { seconds = it.filter { c -> c.isDigit() }.take(2) },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = connected,
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                label = { Text("테스트 출력 시간 (초)") }
+            )
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                Button(
+                    onClick = { statusText = controller.sendRelayControl(selectedRelay, outputType = 1, time = pulseSeconds) },
+                    modifier = Modifier.weight(1f),
+                    enabled = connected
+                ) { Text("${pulseSeconds}초 ON") }
+                OutlinedButton(
+                    onClick = { statusText = controller.sendRelayControl(selectedRelay, outputType = 1, time = 0) },
+                    modifier = Modifier.weight(1f),
+                    enabled = connected
+                ) { Text("지속 ON") }
+                OutlinedButton(
+                    onClick = { statusText = controller.sendRelayControl(selectedRelay, outputType = 0, time = 0) },
+                    modifier = Modifier.weight(1f),
+                    enabled = connected
+                ) { Text("OFF") }
+            }
+
+            DetailGrid(
+                items = listOf(
+                    "마지막 릴레이 패킷" to (controller.diagnostics.lastRelayHex ?: "-"),
+                    "선택" to relayLabel(selectedRelay)
+                )
+            )
+
+            if (controller.relayLogs.isNotEmpty()) {
+                controller.relayLogs.take(5).forEach { log ->
+                    Text(
+                        "${log.relay} · ${log.command} · ${log.packetHex}",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RelaySelectButton(
+    text: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    if (selected) {
+        Button(onClick = onClick, modifier = modifier) { Text(text) }
+    } else {
+        OutlinedButton(onClick = onClick, modifier = modifier) { Text(text) }
+    }
+}
+
+private fun relayLabel(value: Int): String {
+    return when (value) {
+        0 -> "Relay 0+1"
+        1 -> "Relay 0"
+        2 -> "Relay 1"
+        else -> "-"
     }
 }
 
@@ -74,7 +302,7 @@ private fun ConnectionCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("연결", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Text("장비 연결", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                 StatusChip(
                     text = if (serial.connected) "연결" else "미연결",
                     color = if (serial.connected) PassGreen else WaitGray
@@ -82,15 +310,15 @@ private fun ConnectionCard(
             }
             DetailGrid(
                 items = listOf(
-                    "Baudrate" to serial.baudRate.toString(),
+                    "통신 속도" to serial.baudRate.toString(),
                     "상태" to serial.status,
-                    "Ethernet" to controller.ethernetState.detail,
+                    "네트워크 링크" to controller.ethernetState.detail,
                     "USB 장치" to "${controller.usbDevices.size}개"
                 )
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                Button(onClick = { onConnectSerial(9600) }, modifier = Modifier.weight(1f)) { Text("9600") }
-                Button(onClick = { onConnectSerial(115200) }, modifier = Modifier.weight(1f)) { Text("115200") }
+                Button(onClick = { onConnectSerial(9600) }, modifier = Modifier.weight(1f)) { Text("9600으로 연결") }
+                Button(onClick = { onConnectSerial(115200) }, modifier = Modifier.weight(1f)) { Text("115200으로 연결") }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 OutlinedButton(onClick = onRefreshDevices, modifier = Modifier.weight(1f)) { Text("새로고침") }
@@ -117,7 +345,7 @@ private fun WiegandDiagnosticsCard(controller: AccessLinkAppController) {
 
     InfoCard {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("Wiegand", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Text("카드 리더기 데이터 (Wiegand)", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             DetailGrid(
                 items = listOf(
                     "Received" to (diag.lastCardHex ?: "-"),

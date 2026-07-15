@@ -34,7 +34,7 @@ import com.shinhwa.accesslinktester.ui.components.SectionLabel
 @Composable
 fun CardManageSection(controller: AccessLinkAppController) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        SectionLabel("CARD · 카드 관리")
+        SectionLabel("카드 등록·삭제")
 
         RegistrationCard(
             active = controller.registrationActive,
