@@ -1,5 +1,6 @@
 package com.shinhwa.accesslinktester.ui.face
 
+import android.annotation.SuppressLint
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.ImageFormat
@@ -9,6 +10,7 @@ import android.graphics.YuvImage
 import androidx.camera.core.ImageProxy
 import java.io.ByteArrayOutputStream
 
+@SuppressLint("UnsafeOptInUsageError")
 fun ImageProxy.toRotatedBitmap(): Bitmap? {
     val image = image ?: return null
     val nv21 = yuv420ToNv21(this)

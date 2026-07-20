@@ -85,6 +85,12 @@ sealed interface CardOutcome {
         val doorIndexes: Set<Int>
     ) : CardOutcome
 
+    /** 등록 카드지만 자동 개방 대상 문이 지정되지 않은 상태. */
+    data class NoTarget(
+        val personName: String,
+        val cardNumber: String
+    ) : CardOutcome
+
     /** 자동개방 on + 미등록 카드: 거부. */
     data class Denied(val cardNumber: String) : CardOutcome
 }
@@ -109,7 +115,11 @@ fun evaluateCard(
             .filter { it.index in settings.autoOpenDoorIndexes && it.visibleToUser() }
             .map { it.index }
             .toSet()
-        CardOutcome.Granted(registered.name, cardNumber, targets)
+        if (targets.isEmpty()) {
+            CardOutcome.NoTarget(registered.name, cardNumber)
+        } else {
+            CardOutcome.Granted(registered.name, cardNumber, targets)
+        }
     } else {
         CardOutcome.Denied(cardNumber)
     }

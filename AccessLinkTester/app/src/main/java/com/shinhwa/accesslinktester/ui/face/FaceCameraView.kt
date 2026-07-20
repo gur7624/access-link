@@ -1,5 +1,6 @@
 package com.shinhwa.accesslinktester.ui.face
 
+import android.annotation.SuppressLint
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
@@ -27,6 +28,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -95,11 +97,13 @@ fun FaceCameraView(
         return
     }
 
-    CameraPreviewWithAnalyzer(
-        modifier = modifier,
-        enableRecognition = enableRecognition,
-        onFaceState = onFaceState
-    )
+    key(enableRecognition) {
+        CameraPreviewWithAnalyzer(
+            modifier = modifier,
+            enableRecognition = enableRecognition,
+            onFaceState = onFaceState
+        )
+    }
 }
 
 @Composable
@@ -132,9 +136,11 @@ private fun CameraPreviewWithAnalyzer(
                 .build()
         )
     }
+    var cameraProvider by remember { mutableStateOf<ProcessCameraProvider?>(null) }
 
     DisposableEffect(Unit) {
         onDispose {
+            cameraProvider?.unbindAll()
             detector.close()
             recognitionEngine?.close()
             cameraExecutor.shutdown()
@@ -157,7 +163,8 @@ private fun CameraPreviewWithAnalyzer(
             val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
             cameraProviderFuture.addListener(
                 {
-                    val cameraProvider = cameraProviderFuture.get()
+                    val provider = cameraProviderFuture.get()
+                    cameraProvider = provider
                     val preview = Preview.Builder().build().also {
                         it.setSurfaceProvider(previewView.surfaceProvider)
                     }
@@ -179,8 +186,8 @@ private fun CameraPreviewWithAnalyzer(
                     val selector = CameraSelector.DEFAULT_FRONT_CAMERA
 
                     runCatching {
-                        cameraProvider.unbindAll()
-                        cameraProvider.bindToLifecycle(lifecycleOwner, selector, preview, analyzer)
+                        provider.unbindAll()
+                        provider.bindToLifecycle(lifecycleOwner, selector, preview, analyzer)
                         onFaceState(FaceDetectionState(message = "얼굴 인식 대기 중"))
                     }.onFailure {
                         onFaceState(FaceDetectionState(message = "전면 카메라를 시작할 수 없습니다"))
@@ -193,6 +200,7 @@ private fun CameraPreviewWithAnalyzer(
     )
 }
 
+@SuppressLint("UnsafeOptInUsageError")
 private fun analyzeFaceFrame(
     imageProxy: ImageProxy,
     detector: com.google.mlkit.vision.face.FaceDetector,

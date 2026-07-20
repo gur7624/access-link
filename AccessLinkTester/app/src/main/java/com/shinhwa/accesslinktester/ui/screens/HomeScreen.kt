@@ -162,7 +162,7 @@ private fun Header(connected: Boolean, onAdminClick: () -> Unit) {
                         .background(if (connected) CyberSuccess else CyberDanger, RoundedCornerShape(4.dp))
                 )
                 Text(
-                    if (connected) "장비 연결됨" else "장비 미연결",
+                    if (connected) "ACCESS LINK USB 연결됨" else "ACCESS LINK USB 미연결",
                     color = CyberWhite.copy(alpha = 0.82f),
                     fontSize = 12.sp
                 )
@@ -198,12 +198,15 @@ private fun RecognitionPanel(
         faceState.embedding == null -> "얼굴 특징값 생성 중"
         authDecision is FaceAuthDecision.Granted -> authDecision?.message ?: "인증되었습니다"
         authDecision is FaceAuthDecision.Denied -> "등록되지 않은 사용자입니다"
+        authDecision is FaceAuthDecision.Pending -> authDecision?.message ?: "얼굴 확인 중"
+        authDecision is FaceAuthDecision.OpenFailed -> authDecision?.message ?: "문 개방 실패"
         authDecision is FaceAuthDecision.Blocked -> authDecision?.message ?: "인증 대기"
         else -> "안면 인증 대기"
     }
     val statusColor = when {
         authDecision is FaceAuthDecision.Granted -> CyberSuccess
-        authDecision is FaceAuthDecision.Denied -> CyberDanger
+        authDecision is FaceAuthDecision.Denied || authDecision is FaceAuthDecision.OpenFailed -> CyberDanger
+        authDecision is FaceAuthDecision.Pending -> CyberLine
         registeredFaceCount == 0 && faceState.faceCount == 1 -> CyberDanger
         faceState.faceCount == 1 -> if (connected) CyberLine else Color(0xFFFFD166)
         else -> CyberTextMuted
@@ -221,7 +224,7 @@ private fun RecognitionPanel(
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(min = 360.dp, max = 540.dp)
+                    .heightIn(min = 300.dp, max = 460.dp)
                     .aspectRatio(0.84f)
                     .clip(RoundedCornerShape(9.dp))
                     .border(1.dp, CyberLine.copy(alpha = 0.52f), RoundedCornerShape(9.dp))
@@ -267,7 +270,7 @@ private fun RecognitionPanel(
                     ) {
                         Text(statusText, color = statusColor, fontSize = 16.sp, fontWeight = FontWeight.Bold)
                         Text(
-                            if (authDecision is FaceAuthDecision.Granted) "인증된 얼굴일 때만 문 개방 명령을 전송합니다."
+                            if (authDecision is FaceAuthDecision.Granted) "등록된 얼굴 확인 후 문 개방 명령을 전송했습니다."
                             else "카메라를 바라봐 주세요",
                             color = CyberWhite.copy(alpha = 0.82f),
                             fontSize = 11.sp
@@ -311,7 +314,7 @@ private fun CardReaderPanel(
                 Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text("카드로도 출입할 수 있습니다", color = CyberWhite, fontSize = 19.sp, fontWeight = FontWeight.Bold)
                     Text(
-                        if (connected) "등록된 카드를 리더기에 태그해 주세요" else "장비 연결 후 카드 인증을 사용할 수 있습니다",
+                        if (connected) "등록된 카드를 리더기에 태그해 주세요" else "ACCESS LINK USB 연결 후 카드 인증을 사용할 수 있습니다",
                         color = CyberTextMuted,
                         fontSize = 12.sp
                     )
@@ -337,7 +340,7 @@ private fun CardReaderPanel(
                                 disabledContentColor = CyberTextMuted
                             )
                         ) {
-                            Text("${door.name} OPEN", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                            Text("${door.name} 문 열기", fontWeight = FontWeight.Bold, fontSize = 16.sp)
                         }
                     }
                 }

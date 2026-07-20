@@ -64,6 +64,13 @@ class ServiceLogicTest {
         assertTrue(outcome is CardOutcome.Denied)
     }
 
+    @Test
+    fun autoOpenOn_registeredCard_withoutTarget_isNotGranted() {
+        val settings = ServiceSettings(autoOpenEnabled = true, autoOpenDoorIndexes = emptySet())
+        val outcome = evaluateCard("131654", "131654", cards, settings, doors)
+        assertTrue(outcome is CardOutcome.NoTarget)
+    }
+
     // --- PIN 검증 ---
 
     @Test

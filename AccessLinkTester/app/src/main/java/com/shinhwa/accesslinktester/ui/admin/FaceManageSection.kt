@@ -41,7 +41,7 @@ fun FaceManageSection(controller: AccessLinkAppController) {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text("전면 카메라", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                 Text(
-                    "얼굴 비교 모델 연결 전까지는 등록 정보만 저장하며, 이 등록만으로 문은 열지 않습니다.",
+                    "등록한 얼굴은 출입구 카메라 인증에 사용됩니다. 밝은 곳에서 정면을 바라보고 등록하세요.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

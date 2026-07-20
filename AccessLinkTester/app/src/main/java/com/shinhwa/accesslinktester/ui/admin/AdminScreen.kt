@@ -39,6 +39,7 @@ import com.shinhwa.accesslinktester.model.UsbDeviceSnapshot
 import com.shinhwa.accesslinktester.model.visibleToUser
 import com.shinhwa.accesslinktester.ui.components.InfoCard
 import com.shinhwa.accesslinktester.ui.components.SectionLabel
+import com.shinhwa.accesslinktester.ui.screens.AccessLogScreen
 import com.shinhwa.accesslinktester.ui.theme.AccessOrange
 import com.shinhwa.accesslinktester.ui.theme.ActiveBlue
 import com.shinhwa.accesslinktester.ui.theme.FailRed
@@ -186,7 +187,10 @@ private fun AdminDashboard(
     val configuredDoors = controller.doors.count { it.visibleToUser() }
     val connected = controller.serialState.connected
     val hasCredential = controller.cards.isNotEmpty() || controller.faces.isNotEmpty()
-    val autoReady = configuredDoors == 1 || controller.settings.autoOpenDoorIndexes.isNotEmpty()
+    val hasDoorTarget = configuredDoors == 1 || controller.settings.autoOpenDoorIndexes.isNotEmpty()
+    val faceReady = controller.faces.isNotEmpty() && hasDoorTarget
+    val cardReady = controller.cards.isNotEmpty() && controller.settings.autoOpenEnabled && hasDoorTarget
+    val autoReady = faceReady || cardReady
     val completedSteps = listOf(connected, configuredDoors > 0, hasCredential, autoReady).count { it }
 
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -212,7 +216,7 @@ private fun AdminDashboard(
                 SetupStatusRow("1. 장비 연결", if (connected) "연결됨" else "먼저 연결해 주세요", connected)
                 SetupStatusRow("2. 문·릴레이 설정", if (configuredDoors > 0) "설정됨" else "문 이름을 정해 주세요", configuredDoors > 0)
                 SetupStatusRow("3. 사용자 등록", if (hasCredential) "등록됨" else "카드 또는 얼굴 등록 필요", hasCredential)
-                SetupStatusRow("4. 자동 개방 문", if (autoReady) "설정됨" else "열 문을 선택해 주세요", autoReady)
+                SetupStatusRow("4. 인증 후 열 문", if (autoReady) "사용 가능" else "열 문과 자동 개방을 확인해 주세요", autoReady)
                 Text(
                     "카드 ${controller.cards.size}장 · 얼굴 ${controller.faces.size}명 · 최근 출입 기록 ${controller.accessEvents.size}건",
                     style = MaterialTheme.typography.bodySmall,
@@ -454,7 +458,7 @@ private fun AutoOpenSection(
     onUpdateSettings: (ServiceSettings) -> Unit
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        SectionLabel("자동 개방 설정")
+        SectionLabel("카드 자동 개방 설정")
         InfoCard {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Row(
@@ -480,7 +484,13 @@ private fun AutoOpenSection(
                     )
                 }
 
-                Text("대상 문", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                Text(
+                    "얼굴 인증은 등록 얼굴이 일치하면 대상 문을 개방합니다. 얼굴 인증 대상 문은 아래 문 설정을 따릅니다.",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Text("인증 후 열 문", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
                 val selectable = doors.filter { it.visibleToUser() }
                 if (selectable.isEmpty()) {
                     Text(
@@ -499,7 +509,7 @@ private fun AutoOpenSection(
                             Text(door.name, style = MaterialTheme.typography.bodyLarge)
                             Switch(
                                 checked = selected,
-                                enabled = settings.autoOpenEnabled,
+                                enabled = true,
                                 onCheckedChange = { checked ->
                                     val next = if (checked) {
                                         settings.autoOpenDoorIndexes + door.index
@@ -548,6 +558,8 @@ private fun SystemSection(controller: AccessLinkAppController) {
                 }
             }
         }
+
+        AccessLogScreen(events = controller.accessEvents)
 
         InfoCard {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {

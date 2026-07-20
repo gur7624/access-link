@@ -123,7 +123,7 @@ private fun DeviceDiagnosticHome(
 
     DiagnosticMenuButton(
         title = "장비 연결",
-        description = "USB 권한, CH340, 통신 속도, 네트워크 링크",
+        description = "USB 권한, CH340, 통신 속도, 이더넷 링크",
         onClick = { onNavigate(DeviceDiagnosticRoute.CONNECTION) }
     )
     DiagnosticMenuButton(
@@ -133,7 +133,7 @@ private fun DeviceDiagnosticHome(
     )
     DiagnosticMenuButton(
         title = "카드 리더기 데이터",
-        description = "Wiegand 카드번호, Raw HEX, 수신 횟수 확인",
+        description = "Wiegand 카드번호, 원문 HEX, 수신 횟수 확인",
         onClick = { onNavigate(DeviceDiagnosticRoute.WIEGAND) }
     )
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
@@ -312,7 +312,7 @@ private fun ConnectionCard(
                 items = listOf(
                     "통신 속도" to serial.baudRate.toString(),
                     "상태" to serial.status,
-                    "네트워크 링크" to controller.ethernetState.detail,
+                    "이더넷 물리 링크" to controller.ethernetState.detail,
                     "USB 장치" to "${controller.usbDevices.size}개"
                 )
             )
@@ -348,10 +348,10 @@ private fun WiegandDiagnosticsCard(controller: AccessLinkAppController) {
             Text("카드 리더기 데이터 (Wiegand)", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             DetailGrid(
                 items = listOf(
-                    "Received" to (diag.lastCardHex ?: "-"),
-                    "Raw" to (diag.lastWiegandRawHex ?: "-"),
+                    "수신 카드값" to (diag.lastCardHex ?: "-"),
+                    "원문 데이터" to (diag.lastWiegandRawHex ?: "-"),
                     "수신 시간" to (diag.lastWiegandReceivedAt ?: "-"),
-                    "Count" to diag.wiegandReceiveCount.toString(),
+                    "수신 횟수" to diag.wiegandReceiveCount.toString(),
                     "마지막" to (diag.lastWiegand ?: diag.rawWiegandStatus ?: "-")
                 )
             )
@@ -364,7 +364,7 @@ private fun WiegandDiagnosticsCard(controller: AccessLinkAppController) {
                 OutlinedButton(
                     onClick = { controller.clearWiegandDiagnostics() },
                     modifier = Modifier.weight(1f)
-                ) { Text("Clear") }
+                ) { Text("지우기") }
             }
 
             OutlinedTextField(
@@ -383,7 +383,7 @@ private fun WiegandDiagnosticsCard(controller: AccessLinkAppController) {
                 onClick = { statusText = controller.sendWiegandOutput(useParity, outputText) },
                 modifier = Modifier.fillMaxWidth(),
                 enabled = connected
-            ) { Text("SEND") }
+            ) { Text("전송") }
 
             if (controller.wiegandTxLogs.isNotEmpty()) {
                 controller.wiegandTxLogs.take(4).forEach { log ->
@@ -445,11 +445,11 @@ private fun SerialDiagnosticsCard(controller: AccessLinkAppController, port: Ser
                     onClick = { statusText = controller.sendSerial(port, mode, inputText) },
                     modifier = Modifier.weight(1f),
                     enabled = connected
-                ) { Text("SEND") }
+                ) { Text("전송") }
                 OutlinedButton(
                     onClick = { inputText = ""; statusText = "대기"; controller.clearSerial(port) },
                     modifier = Modifier.weight(1f)
-                ) { Text("Clear") }
+                ) { Text("지우기") }
             }
             if (entries.isNotEmpty()) {
                 entries.take(6).forEach { entry ->

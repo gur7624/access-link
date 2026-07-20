@@ -28,10 +28,17 @@ fun AppRoot(
     onRefreshDevices: () -> Unit
 ) {
     var adminRoute by remember { mutableStateOf(AdminRoute.NONE) }
+    val effectiveAdminRoute = if (
+        adminRoute == AdminRoute.ADMIN && !controller.adminAuthenticated
+    ) {
+        AdminRoute.GATE
+    } else {
+        adminRoute
+    }
 
     // 관리자 화면 (PIN 게이트 → 관리자 본문)
-    if (adminRoute != AdminRoute.NONE) {
-        when (adminRoute) {
+    if (effectiveAdminRoute != AdminRoute.NONE) {
+        when (effectiveAdminRoute) {
             AdminRoute.GATE -> AdminGate(
                 onSubmit = { pin ->
                     val ok = controller.tryAdminLogin(pin)

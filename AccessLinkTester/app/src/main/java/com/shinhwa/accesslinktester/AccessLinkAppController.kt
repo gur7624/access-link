@@ -38,6 +38,9 @@ private const val FACE_EMBEDDING_SIZE = 128
 private const val FACE_MATCH_L2_THRESHOLD = 10f
 private const val FACE_OPEN_COOLDOWN_MS = 8_000L
 private const val FACE_FAILURE_LOG_INTERVAL_MS = 3_000L
+private const val MANUAL_OPEN_COOLDOWN_MS = 1_000L
+private const val FACE_CONFIRMATION_COUNT = 3
+private const val FACE_CONFIRMATION_WINDOW_MS = 1_500L
 
 /**
  * 앱 상태 + 출입 서비스 로직의 단일 소유자.
@@ -59,7 +62,9 @@ class AccessLinkAppController(
     var settings by mutableStateOf(store.loadSettings())
         private set
 
-    val accessEvents = mutableStateListOf<AccessEvent>()
+    val accessEvents = mutableStateListOf<AccessEvent>().apply {
+        addAll(store.loadAccessEvents())
+    }
     val systemLogs = mutableStateListOf<String>()
 
     // --- 통신/장비 상태 ---
@@ -93,6 +98,10 @@ class AccessLinkAppController(
     private var lastRaw32CandidateCount = 0
     private var lastFaceOpenAt = 0L
     private var lastFaceFailureLogAt = 0L
+    private val lastDoorCommandAt = mutableMapOf<Int, Long>()
+    private var lastFaceCandidateName: String? = null
+    private var lastFaceCandidateAt = 0L
+    private var faceCandidateCount = 0
 
     // -----------------------------------------------------------------------
     // 관리자 인증
@@ -118,35 +127,48 @@ class AccessLinkAppController(
      * [index] 번 문을 개방한다. door.openSeconds 만큼 릴레이 ON 후 장비가 자동 OFF.
      * @param auto 자동개방(카드 인증)에서 호출되면 true.
      */
-    fun openDoor(index: Int, auto: Boolean = false) {
-        val door = doors.firstOrNull { it.index == index } ?: return
-        if (!auto && !door.visibleToUser()) return
+    fun openDoor(
+        index: Int,
+        auto: Boolean = false,
+        personName: String? = null,
+        cardNumber: String? = null
+    ): Boolean {
+        val door = doors.firstOrNull { it.index == index } ?: return false
+        if (!auto && !door.visibleToUser()) return false
+        val now = System.currentTimeMillis()
+        if (!auto && now - (lastDoorCommandAt[index] ?: 0L) < MANUAL_OPEN_COOLDOWN_MS) {
+            return false
+        }
+        lastDoorCommandAt[index] = now
         val label = door.name.ifBlank { "Relay${door.index}" }
         val packet = AccessLinkProtocol.relayControl(
             useRelay = door.useRelayValue(),
             outputType = 1,
             time = door.openSeconds
         )
-        if (sendPacket(packet, "$label 개방")) {
+        return if (sendPacket(packet, "$label 개방")) {
             diagnostics = diagnostics.copy(lastRelayHex = packet.toHexString())
             addEvent(
                 AccessEventType.OPEN,
-                personName = null,
-                cardNumber = null,
+                personName = personName,
+                cardNumber = cardNumber,
                 message = "$label 개방 송신",
                 detail = "${door.openSeconds}초"
             )
+            true
         } else {
             addEvent(
                 AccessEventType.ERROR,
-                personName = null,
-                cardNumber = null,
+                personName = personName,
+                cardNumber = cardNumber,
                 message = "$label 개방 실패"
             )
+            false
         }
     }
 
     fun sendRelayControl(useRelay: Int, outputType: Int, time: Int): String {
+        if (!adminAuthenticated) return "관리자 인증 필요"
         val relayLabel = when (useRelay) {
             0 -> "Relay 0+1"
             1 -> "Relay 0"
@@ -211,17 +233,20 @@ class AccessLinkAppController(
             cardNumber = null,
             message = "$personName 안면 인증"
         )
-        targets.forEach { openDoor(it.index, auto = true) }
-        return true
+        return targets.all { door ->
+            openDoor(door.index, auto = true, personName = personName)
+        }
     }
 
     fun evaluateFaceEmbedding(embedding: FloatArray): FaceAuthDecision {
         if (!serialState.connected) {
+            resetFaceCandidate()
             return FaceAuthDecision.Blocked("장비가 연결되지 않았습니다")
         }
 
         val candidates = faces.filter { it.embedding.size == FACE_EMBEDDING_SIZE }
         if (candidates.isEmpty()) {
+            resetFaceCandidate()
             return FaceAuthDecision.Blocked("등록된 얼굴이 없습니다")
         }
 
@@ -235,9 +260,23 @@ class AccessLinkAppController(
         val distance = best.second
 
         if (distance <= FACE_MATCH_L2_THRESHOLD) {
+            val sameCandidate = face.name == lastFaceCandidateName &&
+                now - lastFaceCandidateAt <= FACE_CONFIRMATION_WINDOW_MS
+            lastFaceCandidateName = face.name
+            lastFaceCandidateAt = now
+            faceCandidateCount = if (sameCandidate) faceCandidateCount + 1 else 1
+            if (faceCandidateCount < FACE_CONFIRMATION_COUNT) {
+                return FaceAuthDecision.Pending("얼굴을 잠시 유지해 주세요")
+            }
             if (now - lastFaceOpenAt >= FACE_OPEN_COOLDOWN_MS) {
+                val opened = openDoorAfterFaceAuth(face.name)
+                if (!opened) {
+                    return FaceAuthDecision.OpenFailed(
+                        personName = face.name,
+                        message = "인증됐지만 문 개방 명령을 전송하지 못했습니다"
+                    )
+                }
                 lastFaceOpenAt = now
-                openDoorAfterFaceAuth(face.name)
             }
             return FaceAuthDecision.Granted(
                 personName = face.name,
@@ -246,6 +285,7 @@ class AccessLinkAppController(
             )
         }
 
+        resetFaceCandidate()
         if (now - lastFaceFailureLogAt >= FACE_FAILURE_LOG_INTERVAL_MS) {
             lastFaceFailureLogAt = now
             addEvent(
@@ -301,8 +341,22 @@ class AccessLinkAppController(
                     cardNumber = number,
                     message = "${outcome.personName} 인증"
                 )
-                outcome.doorIndexes.forEach { openDoor(it, auto = true) }
+                outcome.doorIndexes.forEach {
+                    openDoor(
+                        it,
+                        auto = true,
+                        personName = outcome.personName,
+                        cardNumber = number
+                    )
+                }
             }
+
+            is CardOutcome.NoTarget -> addEvent(
+                AccessEventType.ERROR,
+                personName = outcome.personName,
+                cardNumber = number,
+                message = "등록 카드 인증 후 개방 대상 없음"
+            )
 
             is CardOutcome.Denied -> addEvent(
                 AccessEventType.DENIED,
@@ -318,6 +372,7 @@ class AccessLinkAppController(
     // -----------------------------------------------------------------------
 
     fun startCardRegistration() {
+        if (!adminAuthenticated) return
         registrationActive = true
         capturedCard = null
         logSystem("카드 등록 대기 시작")
@@ -332,6 +387,7 @@ class AccessLinkAppController(
 
     /** 감지된 카드에 이름을 붙여 저장. 성공 시 true. */
     fun confirmCardRegistration(name: String): Boolean {
+        if (!adminAuthenticated) return false
         val captured = capturedCard ?: return false
         val trimmed = name.trim()
         if (trimmed.isEmpty()) return false
@@ -346,12 +402,14 @@ class AccessLinkAppController(
     }
 
     fun removeCard(key: String) {
+        if (!adminAuthenticated) return
         val next = cards.filterNot { it.key == key }
         cards = next
         store.saveCards(next)
     }
 
     fun registerFace(name: String, embedding: FloatArray?): Boolean {
+        if (!adminAuthenticated) return false
         val trimmed = name.trim()
         if (trimmed.isEmpty() || embedding == null || embedding.size != FACE_EMBEDDING_SIZE) return false
         val now = System.currentTimeMillis()
@@ -368,6 +426,7 @@ class AccessLinkAppController(
     }
 
     fun removeFace(id: String) {
+        if (!adminAuthenticated) return
         val next = faces.filterNot { it.id == id }
         faces = next
         store.saveFaces(next)
@@ -378,23 +437,27 @@ class AccessLinkAppController(
     // -----------------------------------------------------------------------
 
     fun updateDoor(door: DoorConfig) {
+        if (!adminAuthenticated) return
         val next = doors.map { if (it.index == door.index) door else it }
         doors = next
         store.saveDoors(next)
     }
 
     fun updateSettings(newSettings: ServiceSettings) {
+        if (!adminAuthenticated) return
         settings = newSettings
         store.saveSettings(newSettings)
     }
 
     fun resetAllData() {
+        if (!adminAuthenticated) return
         store.clearAll()
         doors = ServiceStore.defaultDoors()
         cards = emptyList()
         faces = emptyList()
         settings = ServiceSettings()
         accessEvents.clear()
+        store.saveAccessEvents(emptyList())
         cancelCardRegistration()
         logSystem("데이터 초기화")
     }
@@ -404,6 +467,7 @@ class AccessLinkAppController(
     // -----------------------------------------------------------------------
 
     fun queryWiegand() {
+        if (!adminAuthenticated) return
         val packet = AccessLinkProtocol.getWiegandInputData()
         if (sendPacket(packet, "Wiegand 조회")) {
             raw32Buffer.clear()
@@ -411,6 +475,7 @@ class AccessLinkAppController(
     }
 
     fun sendWiegandOutput(useParity: Boolean, input: String): String {
+        if (!adminAuthenticated) return "관리자 인증 필요"
         val parseResult = WiegandPayloadCodec.parseOutputHex(input)
         if (parseResult is WiegandPayloadParseResult.Error) {
             val message = "Wiegand OUT 실패: ${parseResult.message}"
@@ -437,6 +502,7 @@ class AccessLinkAppController(
     }
 
     fun sendSerial(port: SerialPort, mode: SerialInputMode, input: String): String {
+        if (!adminAuthenticated) return "관리자 인증 필요"
         val parseResult = SerialPayloadCodec.parse(input, mode)
         if (parseResult is SerialPayloadParseResult.Error) {
             val message = "${port.label} TX 실패: ${parseResult.message}"
@@ -466,6 +532,7 @@ class AccessLinkAppController(
     }
 
     fun clearSerial(port: SerialPort) {
+        if (!adminAuthenticated) return
         when (port) {
             SerialPort.RS232 -> rs232Logs.clear()
             SerialPort.RS485 -> rs485Logs.clear()
@@ -474,6 +541,7 @@ class AccessLinkAppController(
     }
 
     fun clearWiegandDiagnostics() {
+        if (!adminAuthenticated) return
         raw32Buffer.clear()
         lastRaw32CandidateHex = null
         lastRaw32CandidateAt = 0L
@@ -495,6 +563,13 @@ class AccessLinkAppController(
     // -----------------------------------------------------------------------
 
     fun onConnectionStatus(status: AccessLinkConnectionStatus) {
+        if (!status.connected) {
+            raw32Buffer.clear()
+            lastRaw32CandidateHex = null
+            lastRaw32CandidateAt = 0L
+            lastRaw32CandidateCount = 0
+            resetFaceCandidate()
+        }
         serialState = SerialUiState(
             connected = status.connected,
             baudRate = status.baudRate,
@@ -706,6 +781,7 @@ class AccessLinkAppController(
             )
         )
         trim(accessEvents, MAX_EVENTS)
+        store.saveAccessEvents(accessEvents.toList())
     }
 
     private fun addSerialPortLog(port: SerialPort, entry: SerialPortLog) {
@@ -729,6 +805,12 @@ class AccessLinkAppController(
             diff * diff
         }.sum())
     }
+
+    private fun resetFaceCandidate() {
+        lastFaceCandidateName = null
+        lastFaceCandidateAt = 0L
+        faceCandidateCount = 0
+    }
 }
 
 sealed interface FaceAuthDecision {
@@ -746,6 +828,15 @@ sealed interface FaceAuthDecision {
     ) : FaceAuthDecision
 
     data class Blocked(
+        override val message: String
+    ) : FaceAuthDecision
+
+    data class Pending(
+        override val message: String
+    ) : FaceAuthDecision
+
+    data class OpenFailed(
+        val personName: String,
         override val message: String
     ) : FaceAuthDecision
 }
