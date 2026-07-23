@@ -25,8 +25,8 @@ import com.shinhwa.accesslinktester.ui.components.InfoCard
 import com.shinhwa.accesslinktester.ui.components.SectionLabel
 
 /**
- * 문 설정 — Relay0/Relay1 각각 이름·개방시간(초, 0=지속)·사용 여부.
- * 이름이 비었거나 사용 off면 사용자 홈에 노출되지 않는다.
+ * 릴레이 설정 — Relay 0/1 각각 표시 이름·출력 시간(초, 0=지속)·사용 여부.
+ * 표시 이름이 비었거나 사용 off면 사용자 홈에 노출되지 않는다.
  */
 @Composable
 fun DoorConfigSection(
@@ -34,12 +34,12 @@ fun DoorConfigSection(
     onUpdateDoor: (DoorConfig) -> Unit
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        SectionLabel("문·릴레이 설정")
+        SectionLabel("릴레이 설정")
         InfoCard {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text("릴레이와 문 매핑", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Text("Relay 0/1 출력 설정", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                 Text(
-                    "장비 1대는 Relay 0/1 두 개를 제어합니다. 현장 배선에 맞춰 각 릴레이가 어느 문을 여는지 이름과 개방 시간을 지정하세요.",
+                    "ACCESS LINK는 Relay 0/1 두 출력을 제공합니다. 현장 용도에 맞춰 표시 이름, 사용 여부, 출력 시간을 지정하세요.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -68,7 +68,7 @@ private fun DoorConfigCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    "Relay ${door.index} 배선",
+                    "Relay ${door.index}",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold
                 )
@@ -83,7 +83,7 @@ private fun DoorConfigCard(
                 onValueChange = { name = it },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
-                label = { Text("문 이름 (예: 정문)") }
+                label = { Text("표시 이름 (예: 정문, 조명, 락커)") }
             )
 
             OutlinedTextField(
@@ -92,7 +92,7 @@ private fun DoorConfigCard(
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                label = { Text("개방 시간 (초, 0=지속)") }
+                label = { Text("출력 시간 (초, 0=지속)") }
             )
 
             Button(

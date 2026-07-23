@@ -212,7 +212,6 @@ private fun RelayDiagnosticsCard(controller: AccessLinkAppController) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 RelaySelectButton("Relay 0", selectedRelay == 1, { selectedRelay = 1 }, Modifier.weight(1f))
                 RelaySelectButton("Relay 1", selectedRelay == 2, { selectedRelay = 2 }, Modifier.weight(1f))
-                RelaySelectButton("전체", selectedRelay == 0, { selectedRelay = 0 }, Modifier.weight(1f))
             }
 
             OutlinedTextField(
@@ -280,7 +279,6 @@ private fun RelaySelectButton(
 
 private fun relayLabel(value: Int): String {
     return when (value) {
-        0 -> "Relay 0+1"
         1 -> "Relay 0"
         2 -> "Relay 1"
         else -> "-"

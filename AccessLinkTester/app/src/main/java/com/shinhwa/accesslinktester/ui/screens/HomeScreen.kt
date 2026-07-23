@@ -199,7 +199,7 @@ private fun RecognitionPanel(
         authDecision is FaceAuthDecision.Granted -> authDecision?.message ?: "인증되었습니다"
         authDecision is FaceAuthDecision.Denied -> "등록되지 않은 사용자입니다"
         authDecision is FaceAuthDecision.Pending -> authDecision?.message ?: "얼굴 확인 중"
-        authDecision is FaceAuthDecision.OpenFailed -> authDecision?.message ?: "문 개방 실패"
+        authDecision is FaceAuthDecision.OpenFailed -> authDecision?.message ?: "릴레이 출력 실패"
         authDecision is FaceAuthDecision.Blocked -> authDecision?.message ?: "인증 대기"
         else -> "안면 인증 대기"
     }
@@ -270,7 +270,7 @@ private fun RecognitionPanel(
                     ) {
                         Text(statusText, color = statusColor, fontSize = 16.sp, fontWeight = FontWeight.Bold)
                         Text(
-                            if (authDecision is FaceAuthDecision.Granted) "등록된 얼굴 확인 후 문 개방 명령을 전송했습니다."
+                            if (authDecision is FaceAuthDecision.Granted) "등록된 얼굴 확인 후 릴레이 출력 명령을 전송했습니다."
                             else "카메라를 바라봐 주세요",
                             color = CyberWhite.copy(alpha = 0.82f),
                             fontSize = 11.sp
@@ -326,7 +326,7 @@ private fun CardReaderPanel(
 
             if (visibleDoors.isNotEmpty()) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("문 개방", color = CyberTextMuted, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    Text("수동 릴레이 출력", color = CyberTextMuted, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     visibleDoors.forEach { door ->
                         Button(
                             onClick = { onOpenDoor(door.index) },
@@ -340,13 +340,13 @@ private fun CardReaderPanel(
                                 disabledContentColor = CyberTextMuted
                             )
                         ) {
-                            Text("${door.name} 문 열기", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                            Text("${door.name} 출력", fontWeight = FontWeight.Bold, fontSize = 16.sp)
                         }
                     }
                 }
             } else {
                 Text(
-                    "관리자 화면에서 문 이름과 사용 여부를 설정하면 수동 개방 버튼이 표시됩니다.",
+                    "관리자 화면에서 Relay 표시 이름과 사용 여부를 설정하면 수동 출력 버튼이 표시됩니다.",
                     color = CyberTextMuted,
                     fontSize = 12.sp
                 )

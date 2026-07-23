@@ -17,15 +17,15 @@ const val ACCESS_LINK_LAN_PRODUCT_ID = 0x8152
 // 서비스 데이터 모델 (DEV_SPEC v2 · 4장)
 // ---------------------------------------------------------------------------
 
-/** 문(Relay) 하나의 설정. index 0 = Relay0, 1 = Relay1. */
+/** Relay 하나의 설정. index 0 = Relay 0, index 1 = Relay 1. */
 data class DoorConfig(
     val index: Int,
-    val name: String = "",        // 관리자 지정. 비어 있으면 사용자 화면에 노출 안 함
-    val openSeconds: Int = 3,     // 0~99, 0=지속
+    val name: String = "",        // 관리자 지정 표시 이름. 비어 있으면 사용자 화면에 노출 안 함
+    val openSeconds: Int = 3,     // 0~99, 0=지속 출력
     val enabled: Boolean = false  // 사용 여부
 )
 
-/** 사용자 홈에 OPEN 버튼으로 노출할지 판정. 이름 없거나 사용 여부 off면 숨김. */
+/** 사용자 홈에 수동 출력 버튼으로 노출할지 판정. 표시 이름 없거나 사용 여부 off면 숨김. */
 fun DoorConfig.visibleToUser(): Boolean = enabled && name.isNotBlank()
 
 /** 프로토콜 SET_RELAYCONTROL 의 UseRelay 매핑: Relay0=1, Relay1=2. */
@@ -66,7 +66,7 @@ data class AccessEvent(
 
 data class ServiceSettings(
     val autoOpenEnabled: Boolean = false,
-    val autoOpenDoorIndexes: Set<Int> = emptySet()  // 자동개방 대상 문
+    val autoOpenDoorIndexes: Set<Int> = emptySet()  // 인증 성공 시 출력할 Relay index
 )
 
 // ---------------------------------------------------------------------------
@@ -78,14 +78,14 @@ sealed interface CardOutcome {
     /** 자동개방 off: 태그만 기록. 등록자면 이름, 미등록이면 null. */
     data class Tag(val personName: String?, val cardNumber: String) : CardOutcome
 
-    /** 자동개방 on + 등록 카드: 대상 문을 연다. */
+    /** 인증 출력 on + 등록 카드: 대상 Relay를 실행한다. */
     data class Granted(
         val personName: String,
         val cardNumber: String,
         val doorIndexes: Set<Int>
     ) : CardOutcome
 
-    /** 등록 카드지만 자동 개방 대상 문이 지정되지 않은 상태. */
+    /** 등록 카드지만 인증 성공 시 실행할 Relay가 지정되지 않은 상태. */
     data class NoTarget(
         val personName: String,
         val cardNumber: String
@@ -97,7 +97,7 @@ sealed interface CardOutcome {
 
 /**
  * 카드 인증 판정. [cards] 에서 [key] 로 등록 여부를 조회하고 [settings] 에 따라 결과를 낸다.
- * 개방 대상 문은 사용 가능(visibleToUser)한 문으로 한정한다.
+ * 출력 대상 Relay는 사용 가능(visibleToUser)한 Relay로 한정한다.
  */
 fun evaluateCard(
     key: String,

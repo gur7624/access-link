@@ -50,10 +50,11 @@ import com.shinhwa.accesslinktester.ui.theme.WaitGray
 private enum class AdminRoute(val title: String) {
     DASHBOARD("관리자"),
     SETUP("설치 순서"),
-    DOORS("문·릴레이 설정"),
+    DOORS("출력 설정 (Relay)"),
+    INPUTS("입력 설정 (Input)"),
     CARDS("카드 등록"),
     FACES("얼굴 등록"),
-    AUTO("자동 개방 설정"),
+    AUTO("인증 동작 설정"),
     DEVICE("연결·장비 진단"),
     SYSTEM("기록·초기화")
 }
@@ -106,6 +107,11 @@ fun AdminScreen(
                 AdminRoute.DOORS -> DoorConfigSection(
                     doors = controller.doors,
                     onUpdateDoor = controller::updateDoor
+                )
+
+                AdminRoute.INPUTS -> InputConfigSection(
+                    controller = controller,
+                    onOpenDiagnostics = { navigate(AdminRoute.DEVICE) }
                 )
 
                 AdminRoute.CARDS -> CardManageSection(controller = controller)
@@ -184,16 +190,15 @@ private fun AdminDashboard(
     controller: AccessLinkAppController,
     onNavigate: (AdminRoute) -> Unit
 ) {
-    val configuredDoors = controller.doors.count { it.visibleToUser() }
+    val configuredRelays = controller.doors.count { it.visibleToUser() }
     val connected = controller.serialState.connected
     val hasCredential = controller.cards.isNotEmpty() || controller.faces.isNotEmpty()
-    val hasDoorTarget = configuredDoors == 1 || controller.settings.autoOpenDoorIndexes.isNotEmpty()
-    val faceReady = controller.faces.isNotEmpty() && hasDoorTarget
-    val cardReady = controller.cards.isNotEmpty() && controller.settings.autoOpenEnabled && hasDoorTarget
-    val autoReady = faceReady || cardReady
-    val completedSteps = listOf(connected, configuredDoors > 0, hasCredential, autoReady).count { it }
+    val hasRelayTarget = configuredRelays == 1 || controller.settings.autoOpenDoorIndexes.isNotEmpty()
+    val faceReady = controller.faces.isNotEmpty() && hasRelayTarget
+    val cardReady = controller.cards.isNotEmpty() && controller.settings.autoOpenEnabled && hasRelayTarget
+    val automationReady = faceReady || cardReady
 
-    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
         SectionLabel("관리자 홈")
         InfoCard {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -203,50 +208,79 @@ private fun AdminDashboard(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text("설치 준비 상태", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                        Text("${completedSteps}/4 단계 완료", color = ShinhwaBlue, fontWeight = FontWeight.Bold)
+                        Text("ACCESS LINK 상태", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                        Text(
+                            if (connected) "장비와 통신 연결됨" else "장비 연결 또는 권한 확인 필요",
+                            color = if (connected) PassGreen else FailRed,
+                            fontWeight = FontWeight.Bold
+                        )
                     }
                     Text(
-                        if (completedSteps == 4) "사용 가능"
-                        else "설정 필요",
-                        color = if (completedSteps == 4) PassGreen else FailRed,
+                        "Relay ${configuredRelays}/2 사용",
+                        color = if (configuredRelays > 0) ShinhwaBlue else WaitGray,
                         fontWeight = FontWeight.Bold
                     )
                 }
-                SetupStatusRow("1. 장비 연결", if (connected) "연결됨" else "먼저 연결해 주세요", connected)
-                SetupStatusRow("2. 문·릴레이 설정", if (configuredDoors > 0) "설정됨" else "문 이름을 정해 주세요", configuredDoors > 0)
-                SetupStatusRow("3. 사용자 등록", if (hasCredential) "등록됨" else "카드 또는 얼굴 등록 필요", hasCredential)
-                SetupStatusRow("4. 인증 후 열 문", if (autoReady) "사용 가능" else "열 문과 자동 개방을 확인해 주세요", autoReady)
                 Text(
-                    "카드 ${controller.cards.size}장 · 얼굴 ${controller.faces.size}명 · 최근 출입 기록 ${controller.accessEvents.size}건",
+                    "카드 ${controller.cards.size}장 · 얼굴 ${controller.faces.size}명 · 최근 기록 ${controller.accessEvents.size}건",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         }
 
+        SectionLabel("장비 기본 설정")
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            AdminMenuButton(
+                "장비 연결",
+                if (connected) "USB-C 연결됨" else "USB-C·Ethernet 연결 확인",
+                { onNavigate(AdminRoute.DEVICE) },
+                Modifier.weight(1f)
+            )
+            AdminMenuButton(
+                "출력 설정 (Relay)",
+                "Relay 0/1 이름·시간",
+                { onNavigate(AdminRoute.DOORS) },
+                Modifier.weight(1f)
+            )
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            AdminMenuButton(
+                "입력 설정 (Input)",
+                "Input 0/1 감지 확인",
+                { onNavigate(AdminRoute.INPUTS) },
+                Modifier.weight(1f)
+            )
+            AdminMenuButton(
+                "통신 진단",
+                "Wiegand·RS-232·RS-485",
+                { onNavigate(AdminRoute.DEVICE) },
+                Modifier.weight(1f)
+            )
+        }
+
+        SectionLabel("인증과 동작")
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            AdminMenuButton("카드 등록", "Wiegand 카드 저장", { onNavigate(AdminRoute.CARDS) }, Modifier.weight(1f))
+            AdminMenuButton("얼굴 등록", "카메라 얼굴 저장", { onNavigate(AdminRoute.FACES) }, Modifier.weight(1f))
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            AdminMenuButton(
+                "인증 동작 설정",
+                if (automationReady) "실행 Relay 설정됨" else "인증 후 실행 Relay 선택",
+                { onNavigate(AdminRoute.AUTO) },
+                Modifier.weight(1f)
+            )
+            AdminMenuButton("기록", "인증·출력·통신 이력", { onNavigate(AdminRoute.SYSTEM) }, Modifier.weight(1f))
+        }
+
+        SectionLabel("설치 보조")
         Button(
             onClick = { onNavigate(AdminRoute.SETUP) },
             modifier = Modifier.fillMaxWidth(),
             colors = ButtonDefaults.buttonColors(containerColor = ShinhwaBlue)
         ) {
-            Text(if (completedSteps == 4) "설정 다시 확인" else "설치 순서대로 시작")
-        }
-
-        SectionLabel("설정하기")
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-            AdminMenuButton("문·릴레이 설정", "문 이름과 개방 시간", { onNavigate(AdminRoute.DOORS) }, Modifier.weight(1f))
-            AdminMenuButton("자동 개방 설정", "인증 후 열 문 선택", { onNavigate(AdminRoute.AUTO) }, Modifier.weight(1f))
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-            AdminMenuButton("카드 등록", "카드 태그 후 이름 저장", { onNavigate(AdminRoute.CARDS) }, Modifier.weight(1f))
-            AdminMenuButton("얼굴 등록", "카메라로 얼굴 저장", { onNavigate(AdminRoute.FACES) }, Modifier.weight(1f))
-        }
-
-        SectionLabel("현장 점검")
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-            AdminMenuButton("장비 연결·테스트", "USB 권한과 릴레이 확인", { onNavigate(AdminRoute.DEVICE) }, Modifier.weight(1f))
-            AdminMenuButton("기록·초기화", "통신 기록과 데이터 관리", { onNavigate(AdminRoute.SYSTEM) }, Modifier.weight(1f))
+            Text("처음 설치 순서 보기")
         }
     }
 }
@@ -276,9 +310,9 @@ private fun SetupGuideSection(
     }
     val nextStepTitle = when (currentStep) {
         1 -> "장비 연결"
-        2 -> "문과 릴레이 설정"
+        2 -> "릴레이 설정"
         3 -> "사용자 등록"
-        4 -> "인증 후 열 문 선택"
+        4 -> "인증 후 실행 Relay 선택"
         else -> "기본 설치 완료"
     }
 
@@ -313,11 +347,11 @@ private fun SetupGuideSection(
         )
         SetupStepCard(
             number = "2",
-            title = "문과 릴레이 설정",
-            description = "Relay 0·1에 연결된 문 이름과 개방 시간을 정합니다.",
+            title = "릴레이 설정",
+            description = "Relay 0·1의 표시 이름, 사용 여부, 출력 시간을 정합니다.",
             done = configuredDoors > 0,
             current = currentStep == 2,
-            action = "문 설정",
+            action = "릴레이 설정",
             onClick = { onNavigate(AdminRoute.DOORS) }
         )
         SetupStepCard(
@@ -333,11 +367,11 @@ private fun SetupGuideSection(
         )
         SetupStepCard(
             number = "4",
-            title = "인증 후 열 문 선택",
-            description = "문이 여러 개일 때 인증 성공 후 열 문을 지정합니다.",
+            title = "인증 후 실행 Relay 선택",
+            description = "Relay가 여러 개일 때 인증 성공 후 실행할 출력을 지정합니다.",
             done = configuredDoors == 1 || hasAutoTarget,
             current = currentStep == 4,
-            action = "자동 개방",
+            action = "인증 동작",
             onClick = { onNavigate(AdminRoute.AUTO) }
         )
     }
@@ -448,7 +482,7 @@ private fun SetupStepCard(
 }
 
 // ---------------------------------------------------------------------------
-// 자동 개방 — 등록 카드 인증 시 자동 개방 on/off + 대상 문 선택
+// 인증 동작 — 등록 카드 또는 얼굴 인증 성공 시 실행할 Relay 선택
 // ---------------------------------------------------------------------------
 
 @Composable
@@ -458,7 +492,7 @@ private fun AutoOpenSection(
     onUpdateSettings: (ServiceSettings) -> Unit
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        SectionLabel("카드 자동 개방 설정")
+        SectionLabel("인증 동작 설정")
         InfoCard {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Row(
@@ -468,12 +502,12 @@ private fun AutoOpenSection(
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            "등록 카드 자동 개방",
+                            "등록 카드 인증 동작",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            "켜면 등록 카드 인증 시 대상 문을 자동으로 엽니다.",
+                            "켜면 등록 카드 인증 성공 시 선택한 Relay에 출력 명령을 전송합니다.",
                             fontSize = 12.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -485,16 +519,16 @@ private fun AutoOpenSection(
                 }
 
                 Text(
-                    "얼굴 인증은 등록 얼굴이 일치하면 대상 문을 개방합니다. 얼굴 인증 대상 문은 아래 문 설정을 따릅니다.",
+                    "얼굴 인증은 등록 얼굴이 일치하면 선택한 Relay에 출력 명령을 전송합니다.",
                     fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
 
-                Text("인증 후 열 문", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                Text("인증 후 실행할 Relay", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
                 val selectable = doors.filter { it.visibleToUser() }
                 if (selectable.isEmpty()) {
                     Text(
-                        "먼저 문 설정에서 이름·사용 여부를 지정하세요.",
+                        "먼저 릴레이 설정에서 표시 이름과 사용 여부를 지정하세요.",
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -565,7 +599,7 @@ private fun SystemSection(controller: AccessLinkAppController) {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text("데이터 초기화", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                 Text(
-                    "문 설정·카드·자동개방·출입 기록을 모두 삭제합니다.",
+                    "릴레이 설정·카드·인증 동작 설정·출입 기록을 모두 삭제합니다.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

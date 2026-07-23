@@ -31,6 +31,7 @@ import com.shinhwa.accesslinktester.ui.theme.AccessLinkTesterTheme
 
 private const val ACTION_USB_PERMISSION = "com.shinhwa.accesslinktester.USB_PERMISSION"
 private const val DEFAULT_SERIAL_BAUD_RATE = 9600
+private const val AUTO_CONNECT_SERIAL_ON_USB_ATTACH = false
 
 /**
  * Android 배선 전용 — USB 권한/연결, 이더넷 상태, 시리얼 연결 수명주기만 담당하고
@@ -154,7 +155,9 @@ class MainActivity : ComponentActivity() {
 
         val serialDevice = snapshots.firstOrNull { it.isAccessLinkSerial }
         when {
-            serialDevice?.hasPermission == true && !connectionManager.status.connected ->
+            AUTO_CONNECT_SERIAL_ON_USB_ATTACH &&
+                serialDevice?.hasPermission == true &&
+                !connectionManager.status.connected ->
                 connectSerial(DEFAULT_SERIAL_BAUD_RATE)
 
             serialDevice == null && connectionManager.status.connected ->
