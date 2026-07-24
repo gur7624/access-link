@@ -19,6 +19,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.annotation.RequiresApi
 import com.shinhwa.accesslinktester.data.ServiceStore
 import com.shinhwa.accesslinktester.model.ACCESS_LINK_SERIAL_PRODUCT_ID
 import com.shinhwa.accesslinktester.model.ACCESS_LINK_SERIAL_VENDOR_ID
@@ -257,6 +258,7 @@ class MainActivity : ComponentActivity() {
 private fun UsbDevice.isAccessLinkSerialDevice(): Boolean =
     vendorId == ACCESS_LINK_SERIAL_VENDOR_ID && productId == ACCESS_LINK_SERIAL_PRODUCT_ID
 
+@RequiresApi(Build.VERSION_CODES.HONEYCOMB_MR1)
 private fun UsbDevice.toSnapshot(hasPermission: Boolean): UsbDeviceSnapshot {
     val interfaceSnapshots = (0 until interfaceCount).map { index -> getInterface(index).toSnapshot() }
     return UsbDeviceSnapshot(
